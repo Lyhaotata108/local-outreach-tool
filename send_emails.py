@@ -17,10 +17,11 @@ import os
 import smtplib
 import time
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import urlencode, urlparse
 
-from email_templates import render_subject, render_body
+from email_templates import render_subject, render_body, render_html_body
 
 # ============================================================
 # 配置
@@ -67,12 +68,19 @@ def generate_fallback_lead_id(business_name: str, website: str) -> str:
 # 发信核心函数
 # ============================================================
 
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """通过 Gmail SMTP 发送一封邮件，返回是否成功"""
-    msg = MIMEText(body, "plain", "utf-8")
+def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> bool:
+    """
+    通过 Gmail SMTP 发送一封HTML邮件，返回是否成功。
+    multipart/alternative 会同时带纯文本备用版本和HTML按钮版本。
+    """
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = GMAIL_SENDER
     msg["To"] = to_email
+
+    # 顺序很重要：先plain，再html；支持HTML的邮箱客户端会优先展示最后的HTML版本
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
@@ -185,16 +193,26 @@ def main():
             continue
 
         diagnostic_link = build_diagnostic_link(lead_id)
+        city = extract_city_from_address(row.get("address", ""))
         subject = render_subject(business_name, variant_index=i)
         body = render_body(
             business_name=business_name,
-            city=extract_city_from_address(row.get("address", "")),
+            city=city,
+            diagnostic_url=diagnostic_link,
+            industry=args.industry,
+        )
+        html_body = render_html_body(
+            business_name=business_name,
+            city=city,
             diagnostic_url=diagnostic_link,
             industry=args.industry,
         )
 
         print(f"    标题: {subject}")
-        print("    --- 正文预览 ---")
+        print("    --- 正文预览（客户会优先看到HTML按钮版）---")
+        print("    按钮文案: View My Free Diagnostic")
+        print(f"    按钮链接: {diagnostic_link}")
+        print("    纯文本备用正文:")
         print("    " + body.replace("\n", "\n    "))
         print("    ----------------")
 
@@ -209,7 +227,7 @@ def main():
             print("    已跳过\n")
             continue
         elif choice == "y":
-            success = send_email(email, subject, body)
+            success = send_email(email, subject, body, html_body)
             if success:
                 row["status"] = "sent"
                 row["sent_at"] = datetime.now().isoformat(timespec="seconds")
