@@ -1,0 +1,238 @@
+"""
+Step 2: 读取 scrape_leads.py 生成的 CSV，逐条人工确认后发送外联邮件。
+运行：python send_emails.py --file leads_output/leads_Orlando_20260630.csv
+
+发信前需要设置环境变量：
+  export GMAIL_SENDER="youraccount@gmail.com"
+  export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"   # Gmail App Password，不是登录密码
+
+依赖：
+  pip install requests   (已在 scrape_leads.py 用过，这里只用标准库 smtplib)
+"""
+
+import argparse
+import csv
+import hashlib
+import os
+import smtplib
+import time
+from datetime import datetime
+from email.mime.text import MIMEText
+from urllib.parse import urlencode, urlparse
+
+from email_templates import render_subject, render_body
+
+# ============================================================
+# 配置
+# ============================================================
+
+GMAIL_SENDER = os.environ.get("GMAIL_SENDER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+# 诊断工具的基础链接，发信时会自动拼接 lead_id 方便追踪
+DIAGNOSTIC_BASE_URL = "https://local-business-test.vercel.app/"
+
+# 发信间隔（秒）—— 避免短时间内大量发信触发 Gmail 限流/垃圾邮件检测
+SEND_DELAY_SECONDS = 8
+
+
+# ============================================================
+# Lead ID 兜底逻辑：正常情况下 scrape_leads.py 已经写入 lead_id
+# ============================================================
+
+def normalize_website_for_id(website: str) -> str:
+    raw = (website or "").strip().lower()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    netloc = parsed.netloc.replace("www.", "", 1)
+    path = parsed.path.rstrip("/")
+    return f"{netloc}{path}"
+
+
+def generate_fallback_lead_id(business_name: str, website: str) -> str:
+    """
+    给旧CSV兜底生成稳定 lead_id。
+    新CSV应该直接读取 scrape_leads.py 生成的 lead_id，而不是用行号现造。
+    """
+    normalized_name = " ".join((business_name or "").strip().lower().split())
+    normalized_website = normalize_website_for_id(website)
+    source = f"{normalized_name}|{normalized_website}"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    return f"lead_{digest}"
+
+
+# ============================================================
+# 发信核心函数
+# ============================================================
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """通过 Gmail SMTP 发送一封邮件，返回是否成功"""
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_SENDER
+    msg["To"] = to_email
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_SENDER, [to_email], msg.as_string())
+        return True
+    except smtplib.SMTPException as e:
+        print(f"    发送失败: {e}")
+        return False
+
+
+def build_diagnostic_link(lead_id: str) -> str:
+    """
+    拼接诊断工具链接。
+    注意：这里直接使用CSV里的 lead_id，不再使用CSV行号。
+    """
+    query = urlencode({"lead_id": lead_id})
+    return f"{DIAGNOSTIC_BASE_URL}?{query}"
+
+
+def extract_city_from_address(address: str) -> str:
+    """从 Google Places formattedAddress 里尽量取城市名，用于邮件正文。"""
+    parts = [p.strip() for p in (address or "").split(",") if p.strip()]
+    if len(parts) >= 3:
+        return parts[-3]
+    if len(parts) >= 2:
+        return parts[-2]
+    return "your area"
+
+
+def ensure_csv_columns(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """
+    兼容旧CSV：
+    - 如果没有 lead_id，基于商家名+网站补一个稳定ID
+    - 如果没有 sent_at，补空值
+    """
+    if not rows:
+        return rows, []
+
+    fieldnames = list(rows[0].keys())
+
+    if "lead_id" not in fieldnames:
+        fieldnames.insert(0, "lead_id")
+    if "sent_at" not in fieldnames:
+        insert_at = fieldnames.index("status") + 1 if "status" in fieldnames else len(fieldnames)
+        fieldnames.insert(insert_at, "sent_at")
+
+    for row in rows:
+        if not row.get("lead_id"):
+            row["lead_id"] = generate_fallback_lead_id(row.get("business_name", ""), row.get("website", ""))
+        row.setdefault("sent_at", "")
+
+    return rows, fieldnames
+
+
+# ============================================================
+# 主流程
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="读取CSV名单，逐条确认后发送外联邮件")
+    parser.add_argument("--file", required=True, help="scrape_leads.py 生成的 CSV 文件路径")
+    parser.add_argument("--industry", default="local service", help="行业名称，用于邮件正文里的 {industry} 变量")
+    parser.add_argument("--auto-skip-generic", action="store_true",
+                         help="自动跳过质量为 generic 的邮箱（info@/support@等），不询问")
+    args = parser.parse_args()
+
+    if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+        print("错误：未设置 GMAIL_SENDER 或 GMAIL_APP_PASSWORD 环境变量")
+        print("先去 Gmail 账号设置 → 安全性 → App Passwords 生成一个专用密码，再执行：")
+        print("  export GMAIL_SENDER='youraccount@gmail.com'")
+        print("  export GMAIL_APP_PASSWORD='xxxx xxxx xxxx xxxx'")
+        return
+
+    if not os.path.exists(args.file):
+        print(f"错误：找不到文件 {args.file}")
+        return
+
+    with open(args.file, "r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        print("CSV为空，没有可发送记录")
+        return
+
+    rows, fieldnames = ensure_csv_columns(rows)
+
+    pending_rows = [r for r in rows if r.get("status") == "pending"]
+    print(f"共 {len(rows)} 条记录，其中 {len(pending_rows)} 条待发送\n")
+
+    sent_count = 0
+    skipped_count = 0
+
+    for i, row in enumerate(pending_rows, 1):
+        business_name = row["business_name"]
+        email = row["email"]
+        quality = row["email_quality"]
+        lead_id = row.get("lead_id") or generate_fallback_lead_id(business_name, row.get("website", ""))
+        row["lead_id"] = lead_id
+
+        print(f"[{i}/{len(pending_rows)}] {business_name}")
+        print(f"    Lead ID: {lead_id}")
+        print(f"    邮箱: {email} (质量: {quality})")
+
+        if quality == "generic" and args.auto_skip_generic:
+            print("    自动跳过（generic邮箱）\n")
+            row["status"] = "skipped"
+            skipped_count += 1
+            continue
+
+        diagnostic_link = build_diagnostic_link(lead_id)
+        subject = render_subject(business_name, variant_index=i)
+        body = render_body(
+            business_name=business_name,
+            city=extract_city_from_address(row.get("address", "")),
+            diagnostic_url=diagnostic_link,
+            industry=args.industry,
+        )
+
+        print(f"    标题: {subject}")
+        print("    --- 正文预览 ---")
+        print("    " + body.replace("\n", "\n    "))
+        print("    ----------------")
+
+        choice = input("    发送这封邮件吗？[y]发送 / [n]跳过 / [q]退出: ").strip().lower()
+
+        if choice == "q":
+            print("\n用户中止，保存已处理的记录...")
+            break
+        elif choice == "n":
+            row["status"] = "skipped"
+            skipped_count += 1
+            print("    已跳过\n")
+            continue
+        elif choice == "y":
+            success = send_email(email, subject, body)
+            if success:
+                row["status"] = "sent"
+                row["sent_at"] = datetime.now().isoformat(timespec="seconds")
+                sent_count += 1
+                print("    已发送 ✓\n")
+            else:
+                row["status"] = "failed"
+                print("    发送失败，已标记\n")
+            time.sleep(SEND_DELAY_SECONDS)
+        else:
+            print("    无效输入，按跳过处理\n")
+            row["status"] = "skipped"
+            skipped_count += 1
+
+    # 把更新后的状态写回原CSV文件（覆盖）
+    with open(args.file, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\n完成！本次发送 {sent_count} 封，跳过 {skipped_count} 封")
+    print(f"状态已更新到: {args.file}")
+
+
+if __name__ == "__main__":
+    main()
