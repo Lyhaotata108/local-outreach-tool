@@ -2,13 +2,11 @@
 Step 2: 读取 scrape_leads.py 生成的 CSV，逐条人工确认后发送外联邮件。
 运行：python send_emails.py --file leads_output/leads_Orlando_20260630.csv
 
-发信前需要设置环境变量：
-  export GMAIL_SENDER="youraccount@gmail.com"
-  export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"   # Gmail App Password，不是登录密码
-  export SENDER_DISPLAY_NAME="Foxiren Growth Check" # 可选，控制收件人看到的发件人名称
+配置：
+  推荐在项目目录创建 .env。脚本会自动读取，不需要每次 source .env。
 
 依赖：
-  pip install requests   (已在 scrape_leads.py 用过，这里只用标准库 smtplib)
+  只用标准库 smtplib；邮件模板来自 email_templates.py
 """
 
 import argparse
@@ -22,9 +20,40 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 from email_templates import render_subject, render_body, render_html_body
+
+
+# ============================================================
+# 本地 .env 自动读取：支持 KEY=value 和 export KEY=value
+# ============================================================
+
+def load_env_file(path: Path) -> None:
+    """读取项目目录下的 .env，避免每次打开新终端都要手动 source .env。"""
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+
+        if key and value:
+            os.environ.setdefault(key, value)
+
+
+BASE_DIR = Path(__file__).resolve().parent
+load_env_file(BASE_DIR / ".env")
+
 
 # ============================================================
 # 配置
@@ -35,7 +64,7 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 SENDER_DISPLAY_NAME = os.environ.get("SENDER_DISPLAY_NAME", "Foxiren Growth Check")
 
 # 诊断工具的基础链接，发信时会自动拼接 lead_id 方便追踪
-DIAGNOSTIC_BASE_URL = "https://local-business-test.vercel.app/"
+DIAGNOSTIC_BASE_URL = os.environ.get("DIAGNOSTIC_BASE_URL", "https://local-business-test.vercel.app/")
 
 # 发信间隔（秒）—— 避免短时间内大量发信触发 Gmail 限流/垃圾邮件检测
 SEND_DELAY_SECONDS = 8
@@ -227,10 +256,11 @@ def main():
 
     if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
         print("错误：未设置 GMAIL_SENDER 或 GMAIL_APP_PASSWORD 环境变量")
-        print("先去 Gmail 账号设置 → 安全性 → App Passwords 生成一个专用密码，再执行：")
+        print("请在项目目录创建 .env，并写入：")
         print("  export GMAIL_SENDER='youraccount@gmail.com'")
         print("  export GMAIL_APP_PASSWORD='xxxx xxxx xxxx xxxx'")
         print("  export SENDER_DISPLAY_NAME='Foxiren Growth Check'  # 可选")
+        print("脚本会自动读取 .env，不需要每次 source .env。")
         return
 
     if not os.path.exists(args.file):
