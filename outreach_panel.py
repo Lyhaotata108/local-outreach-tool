@@ -6,10 +6,11 @@
 - 从界面运行 run_scrape.py 抓取线索并做增长机会评分
 - 内置城市池，不用手动记城市
 - 查看 leads_output 里的 CSV
-- 统计 pending / sent / skipped / failed 状态
+- 统计 pending / sent / skipped / failed / do_not_contact 状态
 - 预览每条外联邮件
 - 点击按钮发送单封邮件并回写 CSV 状态
 - 用 lead_id 搜索线索
+- 管理 blocklist，避免继续联系明确拒绝的商户
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+from blocklist_utils import add_to_blocklist, ensure_blocklist_file, get_blocklist_path
 
 BASE_DIR = Path(__file__).resolve().parent
 LEADS_DIR = BASE_DIR / "leads_output"
@@ -60,6 +63,8 @@ CITY_PRESETS: dict[str, list[tuple[str, str]]] = {
         ("Portland", "OR"), ("Boise", "ID"),
     ],
 }
+
+STATUS_OPTIONS = ["pending", "sent", "skipped", "failed", "do_not_contact", "not_interested", "replied", "converted"]
 
 
 # ============================================================
@@ -158,11 +163,20 @@ def save_csv(path: Path, df: pd.DataFrame) -> None:
     load_csv_cached.clear()
 
 
+def load_blocklist_df() -> pd.DataFrame:
+    path = get_blocklist_path(BASE_DIR)
+    if not path.exists():
+        return pd.DataFrame(columns=["email", "website", "business_name", "reason", "blocked_at", "source"])
+    return pd.read_csv(path, dtype=str).fillna("")
+
+
 def ensure_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in [
         "lead_id", "business_name", "address", "website", "phone", "email", "email_quality",
         "status", "sent_at", "growth_score", "growth_tier", "growth_reason",
+        "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
         "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
+        "website_has_gift_or_membership", "website_has_local_seo_signals", "website_has_multi_page_structure",
         "is_likely_chain", "website_scan_status",
     ]:
         if col not in df.columns:
@@ -188,6 +202,7 @@ def get_status_counts(df: pd.DataFrame) -> dict[str, int]:
         "sent": int((status == "sent").sum()),
         "skipped": int((status == "skipped").sum()),
         "failed": int((status == "failed").sum()),
+        "do_not_contact": int((status == "do_not_contact").sum()),
     }
 
 
@@ -196,8 +211,10 @@ def row_label(row: pd.Series) -> str:
     email = str(row.get("email", "")) or "no email"
     status = str(row.get("status", "pending")) or "pending"
     score = str(row.get("growth_score", ""))
+    angle = str(row.get("outreach_angle", ""))
     score_part = f"score {score}" if score else "no score"
-    return f"{name}  |  {email}  |  {score_part}  |  {status}"
+    angle_part = f"{angle}" if angle else "no angle"
+    return f"{name}  |  {email}  |  {score_part}  |  {angle_part}  |  {status}"
 
 
 def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, str, str]:
@@ -205,19 +222,23 @@ def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, 
     business_name = mailer.clean_business_name(raw_name)
     lead_id = str(row.get("lead_id", "")) or mailer.generate_fallback_lead_id(raw_name, str(row.get("website", "")))
     city = mailer.extract_city_from_address(str(row.get("address", "")))
-    diagnostic_link = mailer.build_diagnostic_link(lead_id)
+    outreach_angle = str(row.get("outreach_angle", ""))
+    custom_intro = str(row.get("dynamic_email_intro", ""))
+    diagnostic_link = mailer.build_diagnostic_link(lead_id, outreach_angle=outreach_angle)
     subject = mailer.render_subject(business_name, variant_index=0)
     text_body = mailer.render_body(
         business_name=business_name,
         city=city,
         diagnostic_url=diagnostic_link,
         industry=industry,
+        custom_intro=custom_intro,
     )
     html_body = mailer.render_html_body(
         business_name=business_name,
         city=city,
         diagnostic_url=diagnostic_link,
         industry=industry,
+        custom_intro=custom_intro,
     )
     return business_name, subject, text_body, html_body, diagnostic_link
 
@@ -282,6 +303,8 @@ with st.sidebar:
     st.divider()
     st.caption("配置文件路径")
     st.code(str(BASE_DIR / ".env"), language="text")
+    st.caption("Blocklist 路径")
+    st.code(str(get_blocklist_path(BASE_DIR)), language="text")
     st.caption("如果刚改了 .env，重启面板最稳。")
 
 
@@ -289,11 +312,12 @@ with st.sidebar:
 # 主界面 Tabs
 # ============================================================
 
-tab_scrape, tab_csv, tab_send, tab_search = st.tabs([
+tab_scrape, tab_csv, tab_send, tab_search, tab_blocklist = st.tabs([
     "① 抓取线索",
     "② 查看CSV",
     "③ 预览/发送邮件",
     "④ lead_id 搜索",
+    "⑤ Blocklist",
 ])
 
 
@@ -303,7 +327,7 @@ tab_scrape, tab_csv, tab_send, tab_search = st.tabs([
 
 with tab_scrape:
     st.subheader("抓取本地商家")
-    st.write("这里会调用 `run_scrape.py`，先抓取，再给每个商户打增长机会分，输出仍然保存到 `leads_output/`。")
+    st.write("这里会调用 `run_scrape.py`，先抓取，再给每个商户打增长机会分、网站成熟度分，并自动分配外联角度。")
 
     preset_name = st.selectbox("城市池", list(CITY_PRESETS.keys()), index=1)
     preset_cities = CITY_PRESETS[preset_name]
@@ -330,7 +354,7 @@ with tab_scrape:
         with f5:
             exclude_keywords_input = st.text_input("排除关键词", value="", placeholder="多个用英文逗号分隔，例如 franchise,corporate")
 
-        st.caption("建议前期：评分 4.0、评论 10、增长分 60。增长分会综合评分、评论缺口、邮箱、是否连锁、网站是否缺少预约/电话/评价/优惠入口。")
+        st.caption("建议前期：评分 4.0、评论 10、增长分 60。网站成熟且评论很多的商户会自动降权或跳过；blocklist 里的邮箱/网站会直接跳过。")
 
     min_rating = float(min_rating_input) if enable_quality_filter else 0.0
     min_reviews = int(min_reviews_input) if enable_quality_filter else 0
@@ -429,24 +453,28 @@ with tab_csv:
         df = load_csv(selected_csv)
         counts = get_status_counts(df)
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Total", counts["total"])
         c2.metric("Pending", counts["pending"])
         c3.metric("Sent", counts["sent"])
         c4.metric("Skipped", counts["skipped"])
         c5.metric("Failed", counts["failed"])
+        c6.metric("DNC", counts["do_not_contact"])
 
-        col_a, col_b, col_c = st.columns([1, 1, 2])
+        col_a, col_b, col_c, col_d = st.columns([1, 1, 1, 2])
         with col_a:
             status_filter = st.multiselect(
                 "状态筛选",
-                ["pending", "sent", "skipped", "failed"],
+                STATUS_OPTIONS,
                 default=["pending", "sent", "skipped", "failed"],
             )
         with col_b:
             tier_options = sorted([q for q in df["growth_tier"].unique().tolist() if q])
             tier_filter = st.multiselect("增长等级", tier_options, default=tier_options)
         with col_c:
+            angle_options = sorted([q for q in df["outreach_angle"].unique().tolist() if q])
+            angle_filter = st.multiselect("外联角度", angle_options, default=angle_options)
+        with col_d:
             keyword = st.text_input("搜索店名 / 邮箱 / lead_id / 增长原因", value="")
 
         filtered = df.copy()
@@ -454,16 +482,20 @@ with tab_csv:
             filtered = filtered[filtered["status"].replace("", "pending").isin(status_filter)]
         if tier_filter:
             filtered = filtered[filtered["growth_tier"].isin(tier_filter)]
+        if angle_filter:
+            filtered = filtered[filtered["outreach_angle"].isin(angle_filter)]
         if keyword.strip():
             kw = keyword.strip().lower()
             joined = filtered.astype(str).agg(" ".join, axis=1).str.lower()
             filtered = filtered[joined.str.contains(kw, na=False)]
 
         display_cols = [
-            "growth_score", "growth_tier", "growth_reason",
+            "growth_score", "growth_tier", "website_maturity_score", "website_maturity_tier", "outreach_angle",
+            "growth_reason", "dynamic_email_intro",
             "lead_id", "business_name", "email", "email_quality", "status", "sent_at",
             "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
-            "is_likely_chain", "website", "phone", "google_rating", "review_count", "address",
+            "website_has_gift_or_membership", "website_has_local_seo_signals", "is_likely_chain",
+            "website", "phone", "google_rating", "review_count", "address",
         ]
         display_cols = [c for c in display_cols if c in filtered.columns]
         st.dataframe(filtered[display_cols], use_container_width=True, height=520)
@@ -498,7 +530,7 @@ with tab_send:
 
         status_to_show = st.multiselect(
             "显示哪些状态",
-            ["pending", "failed", "skipped", "sent"],
+            STATUS_OPTIONS,
             default=["pending", "failed"],
             key="send_status_filter",
         )
@@ -524,25 +556,32 @@ with tab_send:
                 st.write("邮箱：", row.get("email", ""))
                 st.write("状态：", row.get("status", "pending"))
                 st.write("增长分：", row.get("growth_score", ""), row.get("growth_tier", ""))
+                st.write("网站成熟度：", row.get("website_maturity_score", ""), row.get("website_maturity_tier", ""))
+                st.write("外联角度：", row.get("outreach_angle", ""))
                 st.write("增长原因：", row.get("growth_reason", ""))
+                st.write("动态开场：", row.get("dynamic_email_intro", ""))
                 st.write("Lead ID：", row.get("lead_id", ""))
                 st.write("按钮链接：", diagnostic_link)
                 st.write("发件人显示：", f"{mailer.SENDER_DISPLAY_NAME} <{mailer.GMAIL_SENDER}>")
                 st.write("标题：", subject)
-                st.text_area("纯文本备用正文", text_body, height=260)
+                st.text_area("纯文本备用正文", text_body, height=240)
 
             with right:
                 st.markdown("#### HTML 邮件预览")
                 components.html(html_body, height=460, scrolling=True)
 
-            action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
+            action_col1, action_col2, action_col3, action_col4 = st.columns([1, 1, 1.3, 1.7])
             with action_col1:
                 send_clicked = st.button("发送这封", type="primary")
             with action_col2:
                 skip_clicked = st.button("标记跳过")
+            with action_col3:
+                dnc_clicked = st.button("不要再联系")
 
             if send_clicked:
-                if not os.environ.get("GMAIL_SENDER") or not os.environ.get("GMAIL_APP_PASSWORD"):
+                if row.get("status") == "do_not_contact":
+                    st.error("这条线索已经是 do_not_contact，不应继续发送。")
+                elif not os.environ.get("GMAIL_SENDER") or not os.environ.get("GMAIL_APP_PASSWORD"):
                     st.error("未设置 GMAIL_SENDER 或 GMAIL_APP_PASSWORD。请检查 .env 后重启面板。")
                 else:
                     with st.spinner("正在发送..."):
@@ -562,6 +601,23 @@ with tab_send:
                 send_df.loc[int(row_id), "status"] = "skipped"
                 save_csv(selected_csv_send, send_df)
                 st.success("已标记 skipped，并写回 CSV。")
+                st.rerun()
+
+            if dnc_clicked:
+                added = add_to_blocklist(
+                    BASE_DIR,
+                    email=str(row.get("email", "")),
+                    website=str(row.get("website", "")),
+                    business_name=str(row.get("business_name", "")),
+                    reason="manual_do_not_contact",
+                    source="outreach_panel",
+                )
+                send_df.loc[int(row_id), "status"] = "do_not_contact"
+                save_csv(selected_csv_send, send_df)
+                if added:
+                    st.success("已加入 blocklist，并标记 do_not_contact。之后抓取/发送会自动跳过。")
+                else:
+                    st.info("这条线索已在 blocklist 中，已标记 do_not_contact。")
                 st.rerun()
 
 
@@ -588,7 +644,7 @@ with tab_search:
         if matches:
             result_df = pd.concat(matches, ignore_index=True)
             show_cols = [
-                "csv_file", "growth_score", "growth_tier", "growth_reason",
+                "csv_file", "growth_score", "growth_tier", "website_maturity_score", "outreach_angle", "growth_reason",
                 "lead_id", "business_name", "email", "status", "sent_at",
                 "website", "phone", "address",
             ]
@@ -596,3 +652,60 @@ with tab_search:
             st.dataframe(result_df[show_cols], use_container_width=True, height=420)
         else:
             st.warning("没有找到匹配记录。")
+
+
+# ------------------------------------------------------------
+# Tab 5: Blocklist
+# ------------------------------------------------------------
+
+with tab_blocklist:
+    st.subheader("Blocklist / 不要再联系")
+    st.write("这里记录明确不应继续联系的邮箱或网站。抓取和发送时会自动跳过 blocklist 中的线索。")
+
+    blocklist_path = get_blocklist_path(BASE_DIR)
+    st.code(str(blocklist_path), language="text")
+
+    with st.expander("手动添加到 blocklist", expanded=False):
+        b1, b2 = st.columns(2)
+        with b1:
+            block_email = st.text_input("邮箱", key="manual_block_email")
+            block_business = st.text_input("商户名称", key="manual_block_business")
+        with b2:
+            block_website = st.text_input("网站", key="manual_block_website")
+            block_reason = st.text_input("原因", value="manual_do_not_contact", key="manual_block_reason")
+
+        if st.button("添加到 blocklist"):
+            if not block_email.strip() and not block_website.strip():
+                st.error("至少填写邮箱或网站。")
+            else:
+                added = add_to_blocklist(
+                    BASE_DIR,
+                    email=block_email,
+                    website=block_website,
+                    business_name=block_business,
+                    reason=block_reason or "manual_do_not_contact",
+                    source="manual_panel",
+                )
+                if added:
+                    st.success("已添加到 blocklist。")
+                else:
+                    st.info("邮箱或网站已存在于 blocklist，没有重复添加。")
+                st.rerun()
+
+    if st.button("创建/刷新 blocklist.csv"):
+        ensure_blocklist_file(BASE_DIR)
+        st.success("blocklist.csv 已确认存在。")
+        st.rerun()
+
+    block_df = load_blocklist_df()
+    if block_df.empty:
+        st.info("当前 blocklist 为空。")
+    else:
+        st.metric("Blocked entries", len(block_df))
+        st.dataframe(block_df, use_container_width=True, height=420)
+        st.download_button(
+            "下载 blocklist.csv",
+            data=blocklist_path.read_bytes(),
+            file_name="blocklist.csv",
+            mime="text/csv",
+        )
