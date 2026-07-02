@@ -64,15 +64,14 @@ CITY_PRESETS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
-STATUS_OPTIONS = ["pending", "sent", "skipped", "failed", "do_not_contact", "not_interested", "replied", "converted"]
+STATUS_OPTIONS = [
+    "pending", "sent", "skipped", "failed", "do_not_contact",
+    "not_interested", "replied", "converted",
+]
 
-
-# ============================================================
-# 本地 .env 读取：支持 KEY=value 和 export KEY=value
-# 不会上传密钥；只读取你本地项目目录里的 .env
-# ============================================================
 
 def load_env_file(path: Path) -> None:
+    """读取项目目录 .env，支持 KEY=value 和 export KEY=value。"""
     if not path.exists():
         return
 
@@ -80,47 +79,33 @@ def load_env_file(path: Path) -> None:
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-
         if line.startswith("export "):
             line = line[len("export "):].strip()
 
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-
         if key and value:
             os.environ.setdefault(key, value)
 
 
 load_env_file(BASE_DIR / ".env")
 
-# 必须在读取 .env 之后再导入 send_emails，否则里面的环境变量常量拿不到最新值
+# 必须在读取 .env 后导入，否则 send_emails 里的环境变量常量拿不到最新值。
 import send_emails as mailer  # noqa: E402
 
 
-# ============================================================
-# 页面基础配置
-# ============================================================
+st.set_page_config(page_title="Local Outreach Panel", page_icon="📬", layout="wide")
 
-st.set_page_config(
-    page_title="Local Outreach Panel",
-    page_icon="📬",
-    layout="wide",
-)
-
-CUSTOM_CSS = """
+st.markdown(
+    """
 <style>
 .block-container { padding-top: 1.5rem; padding-bottom: 3rem; }
-.metric-card {
-  padding: 14px 16px;
-  border: 1px solid rgba(49, 51, 63, 0.15);
-  border-radius: 12px;
-  background: rgba(250, 250, 250, 0.75);
-}
 .small-muted { color: #6b7280; font-size: 13px; }
 </style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 def mask_value(value: str, keep: int = 4) -> str:
@@ -171,14 +156,15 @@ def load_blocklist_df() -> pd.DataFrame:
 
 
 def ensure_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for col in [
+    required_cols = [
         "lead_id", "business_name", "address", "website", "phone", "email", "email_quality",
         "status", "sent_at", "growth_score", "growth_tier", "growth_reason",
         "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
         "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
         "website_has_gift_or_membership", "website_has_local_seo_signals", "website_has_multi_page_structure",
-        "is_likely_chain", "website_scan_status",
-    ]:
+        "is_likely_chain", "website_scan_status", "google_rating", "review_count",
+    ]
+    for col in required_cols:
         if col not in df.columns:
             df[col] = ""
 
@@ -190,7 +176,6 @@ def ensure_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
                 str(row.get("business_name", "")),
                 str(row.get("website", "")),
             )
-
     return df.fillna("")
 
 
@@ -213,7 +198,7 @@ def row_label(row: pd.Series) -> str:
     score = str(row.get("growth_score", ""))
     angle = str(row.get("outreach_angle", ""))
     score_part = f"score {score}" if score else "no score"
-    angle_part = f"{angle}" if angle else "no angle"
+    angle_part = angle if angle else "no angle"
     return f"{name}  |  {email}  |  {score_part}  |  {angle_part}  |  {status}"
 
 
@@ -285,10 +270,6 @@ def run_scrape_command(
     )
 
 
-# ============================================================
-# 侧边栏：配置状态
-# ============================================================
-
 st.title("📬 Local Outreach Panel")
 st.caption("本地外联工具操作面板：抓取线索、查看CSV、预览邮件、发送单封邮件、追踪 lead_id。")
 
@@ -299,7 +280,6 @@ with st.sidebar:
     st.write("Gmail Sender：", cfg["GMAIL_SENDER"] or "未设置")
     st.write("Gmail App Password：", "已设置" if cfg["GMAIL_APP_PASSWORD"] else "未设置")
     st.write("Sender Name：", cfg["SENDER_DISPLAY_NAME"] or "Foxiren Growth Check")
-
     st.divider()
     st.caption("配置文件路径")
     st.code(str(BASE_DIR / ".env"), language="text")
@@ -307,10 +287,6 @@ with st.sidebar:
     st.code(str(get_blocklist_path(BASE_DIR)), language="text")
     st.caption("如果刚改了 .env，重启面板最稳。")
 
-
-# ============================================================
-# 主界面 Tabs
-# ============================================================
 
 tab_scrape, tab_csv, tab_send, tab_search, tab_blocklist = st.tabs([
     "① 抓取线索",
@@ -320,10 +296,6 @@ tab_scrape, tab_csv, tab_send, tab_search, tab_blocklist = st.tabs([
     "⑤ Blocklist",
 ])
 
-
-# ------------------------------------------------------------
-# Tab 1: 抓取线索
-# ------------------------------------------------------------
 
 with tab_scrape:
     st.subheader("抓取本地商家")
@@ -346,7 +318,7 @@ with tab_scrape:
         with f1:
             min_rating_input = st.number_input("最低评分", min_value=0.0, max_value=5.0, value=4.0, step=0.1)
         with f2:
-            min_reviews_input = st.number_input("最低评论数", min_value=0, max_value=10000, value=10, step=5)
+            min_reviews_input = st.number_input("最低评论数", min_value=0, max_value=10000, value=1, step=1)
         with f3:
             min_growth_score_input = st.number_input("最低增长分", min_value=0, max_value=100, value=60, step=5)
         with f4:
@@ -354,7 +326,7 @@ with tab_scrape:
         with f5:
             exclude_keywords_input = st.text_input("排除关键词", value="", placeholder="多个用英文逗号分隔，例如 franchise,corporate")
 
-        st.caption("建议前期：评分 4.0、评论 10、增长分 60。网站成熟且评论很多的商户会自动降权或跳过；blocklist 里的邮箱/网站会直接跳过。")
+        st.caption("建议前期：评分 4.0、评论 1、增长分 60。高评分新店会进入 new_business_growth；成熟大店和连锁会自动降权或跳过。")
 
     min_rating = float(min_rating_input) if enable_quality_filter else 0.0
     min_reviews = int(min_reviews_input) if enable_quality_filter else 0
@@ -376,7 +348,6 @@ with tab_scrape:
             city = st.text_input("城市", value="Orlando")
         with col_state:
             state = st.text_input("州", value="FL")
-        batch_mode = False
         target_cities = [(city, state)]
 
     if st.button("开始抓取", type="primary"):
@@ -386,7 +357,6 @@ with tab_scrape:
             all_stdout: list[str] = []
             all_stderr: list[str] = []
             failed_count = 0
-
             progress = st.progress(0)
             status_box = st.empty()
 
@@ -413,7 +383,6 @@ with tab_scrape:
                     all_stderr.append(header + "\n" + result.stderr)
                 if result.returncode != 0:
                     failed_count += 1
-
                 progress.progress(idx / len(target_cities))
 
             status_box.empty()
@@ -421,23 +390,14 @@ with tab_scrape:
                 st.text_area("输出", "\n".join(all_stdout), height=360)
             if all_stderr:
                 st.text_area("错误/警告", "\n".join(all_stderr), height=180)
-
             if failed_count == 0:
                 st.success("抓取完成。去 ② 查看CSV 里选择最新文件。")
             else:
                 st.error(f"有 {failed_count} 个城市抓取失败，请看错误输出。")
 
 
-# ------------------------------------------------------------
-# Tab 2 & 3 shared CSV selector
-# ------------------------------------------------------------
-
 csv_files = get_csv_files()
 
-
-# ------------------------------------------------------------
-# Tab 2: 查看CSV
-# ------------------------------------------------------------
 
 with tab_csv:
     st.subheader("查看线索 CSV")
@@ -463,11 +423,7 @@ with tab_csv:
 
         col_a, col_b, col_c, col_d = st.columns([1, 1, 1, 2])
         with col_a:
-            status_filter = st.multiselect(
-                "状态筛选",
-                STATUS_OPTIONS,
-                default=["pending", "sent", "skipped", "failed"],
-            )
+            status_filter = st.multiselect("状态筛选", STATUS_OPTIONS, default=["pending", "sent", "skipped", "failed"])
         with col_b:
             tier_options = sorted([q for q in df["growth_tier"].unique().tolist() if q])
             tier_filter = st.multiselect("增长等级", tier_options, default=tier_options)
@@ -491,26 +447,15 @@ with tab_csv:
 
         display_cols = [
             "growth_score", "growth_tier", "website_maturity_score", "website_maturity_tier", "outreach_angle",
-            "growth_reason", "dynamic_email_intro",
-            "lead_id", "business_name", "email", "email_quality", "status", "sent_at",
-            "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
-            "website_has_gift_or_membership", "website_has_local_seo_signals", "is_likely_chain",
-            "website", "phone", "google_rating", "review_count", "address",
+            "growth_reason", "dynamic_email_intro", "lead_id", "business_name", "email", "email_quality",
+            "status", "sent_at", "website_has_booking", "website_has_phone_cta", "website_has_reviews",
+            "website_has_offer", "website_has_gift_or_membership", "website_has_local_seo_signals",
+            "is_likely_chain", "website", "phone", "google_rating", "review_count", "address",
         ]
         display_cols = [c for c in display_cols if c in filtered.columns]
         st.dataframe(filtered[display_cols], use_container_width=True, height=520)
+        st.download_button("下载当前CSV", data=selected_csv.read_bytes(), file_name=selected_csv.name, mime="text/csv")
 
-        st.download_button(
-            "下载当前CSV",
-            data=selected_csv.read_bytes(),
-            file_name=selected_csv.name,
-            mime="text/csv",
-        )
-
-
-# ------------------------------------------------------------
-# Tab 3: 预览/发送邮件
-# ------------------------------------------------------------
 
 with tab_send:
     st.subheader("预览并发送单封邮件")
@@ -525,15 +470,9 @@ with tab_send:
         )
         send_df = load_csv(selected_csv_send)
         send_df["_row_id"] = send_df.index
-
         industry_send = st.text_input("邮件里的行业名称", value="massage spa", key="industry_send")
 
-        status_to_show = st.multiselect(
-            "显示哪些状态",
-            STATUS_OPTIONS,
-            default=["pending", "failed"],
-            key="send_status_filter",
-        )
+        status_to_show = st.multiselect("显示哪些状态", STATUS_OPTIONS, default=["pending", "failed"], key="send_status_filter")
         candidate_df = send_df[send_df["status"].replace("", "pending").isin(status_to_show)].copy()
         candidate_df = candidate_df[candidate_df["email"].astype(str).str.len() > 0]
 
@@ -570,7 +509,7 @@ with tab_send:
                 st.markdown("#### HTML 邮件预览")
                 components.html(html_body, height=460, scrolling=True)
 
-            action_col1, action_col2, action_col3, action_col4 = st.columns([1, 1, 1.3, 1.7])
+            action_col1, action_col2, action_col3, _ = st.columns([1, 1, 1.3, 1.7])
             with action_col1:
                 send_clicked = st.button("发送这封", type="primary")
             with action_col2:
@@ -621,14 +560,9 @@ with tab_send:
                 st.rerun()
 
 
-# ------------------------------------------------------------
-# Tab 4: lead_id 搜索
-# ------------------------------------------------------------
-
 with tab_search:
     st.subheader("通过 lead_id 找原始商家")
     st.write("当诊断工具邮件里出现 `Outreach Lead ID` 时，可以在这里反查对应 CSV 和商家。")
-
     lead_query = st.text_input("输入 lead_id 或部分关键词", value="")
     if lead_query.strip():
         query = lead_query.strip().lower()
@@ -644,8 +578,8 @@ with tab_search:
         if matches:
             result_df = pd.concat(matches, ignore_index=True)
             show_cols = [
-                "csv_file", "growth_score", "growth_tier", "website_maturity_score", "outreach_angle", "growth_reason",
-                "lead_id", "business_name", "email", "status", "sent_at",
+                "csv_file", "growth_score", "growth_tier", "website_maturity_score", "outreach_angle",
+                "growth_reason", "lead_id", "business_name", "email", "status", "sent_at",
                 "website", "phone", "address",
             ]
             show_cols = [c for c in show_cols if c in result_df.columns]
@@ -654,14 +588,9 @@ with tab_search:
             st.warning("没有找到匹配记录。")
 
 
-# ------------------------------------------------------------
-# Tab 5: Blocklist
-# ------------------------------------------------------------
-
 with tab_blocklist:
     st.subheader("Blocklist / 不要再联系")
     st.write("这里记录明确不应继续联系的邮箱或网站。抓取和发送时会自动跳过 blocklist 中的线索。")
-
     blocklist_path = get_blocklist_path(BASE_DIR)
     st.code(str(blocklist_path), language="text")
 
