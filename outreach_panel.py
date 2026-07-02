@@ -155,10 +155,25 @@ def load_blocklist_df() -> pd.DataFrame:
     return pd.read_csv(path, dtype=str).fillna("")
 
 
+def sort_by_priority(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "send_priority_score" not in df.columns:
+        return df
+    tmp = df.copy()
+    tmp["_priority_sort"] = pd.to_numeric(tmp.get("send_priority_score", ""), errors="coerce").fillna(0)
+    tmp["_growth_sort"] = pd.to_numeric(tmp.get("growth_score", ""), errors="coerce").fillna(0)
+    tmp["_email_sort"] = (tmp.get("email_quality", "").astype(str).str.lower() == "good").astype(int)
+    tmp = tmp.sort_values(
+        by=["_priority_sort", "_growth_sort", "_email_sort"],
+        ascending=[False, False, False],
+    )
+    return tmp.drop(columns=["_priority_sort", "_growth_sort", "_email_sort"], errors="ignore")
+
+
 def ensure_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     required_cols = [
         "lead_id", "business_name", "address", "website", "phone", "email", "email_quality",
-        "status", "sent_at", "growth_score", "growth_tier", "growth_reason",
+        "status", "sent_at", "send_priority_score", "send_priority_tier", "send_priority_reason",
+        "growth_score", "growth_tier", "growth_reason",
         "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
         "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
         "website_has_gift_or_membership", "website_has_local_seo_signals", "website_has_multi_page_structure",
@@ -195,11 +210,13 @@ def row_label(row: pd.Series) -> str:
     name = str(row.get("business_name", "")) or "Unknown business"
     email = str(row.get("email", "")) or "no email"
     status = str(row.get("status", "pending")) or "pending"
+    priority = str(row.get("send_priority_score", ""))
     score = str(row.get("growth_score", ""))
     angle = str(row.get("outreach_angle", ""))
-    score_part = f"score {score}" if score else "no score"
+    priority_part = f"priority {priority}" if priority else "no priority"
+    score_part = f"growth {score}" if score else "no growth"
     angle_part = angle if angle else "no angle"
-    return f"{name}  |  {email}  |  {score_part}  |  {angle_part}  |  {status}"
+    return f"{name}  |  {email}  |  {priority_part}  |  {score_part}  |  {angle_part}  |  {status}"
 
 
 def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, str, str]:
@@ -299,7 +316,7 @@ tab_scrape, tab_csv, tab_send, tab_search, tab_blocklist = st.tabs([
 
 with tab_scrape:
     st.subheader("抓取本地商家")
-    st.write("这里会调用 `run_scrape.py`，先抓取，再给每个商户打增长机会分、网站成熟度分，并自动分配外联角度。")
+    st.write("这里会调用 `run_scrape.py`，先抓取，再给每个商户打增长机会分、网站成熟度分、发送优先级，并自动分配外联角度。")
 
     preset_name = st.selectbox("城市池", list(CITY_PRESETS.keys()), index=1)
     preset_cities = CITY_PRESETS[preset_name]
@@ -326,7 +343,7 @@ with tab_scrape:
         with f5:
             exclude_keywords_input = st.text_input("排除关键词", value="", placeholder="多个用英文逗号分隔，例如 franchise,corporate")
 
-        st.caption("建议前期：评分 4.0、评论 1、增长分 60。高评分新店会进入 new_business_growth；成熟大店和连锁会自动降权或跳过。")
+        st.caption("建议前期：评分 4.0、评论 1、增长分 60。抓取后会按发送优先级自动排序；高评分新店、评论增长、网站转化机会会更靠前。")
 
     min_rating = float(min_rating_input) if enable_quality_filter else 0.0
     min_reviews = int(min_reviews_input) if enable_quality_filter else 0
@@ -410,7 +427,7 @@ with tab_csv:
             format_func=lambda p: f"{p.name}  ·  {datetime.fromtimestamp(p.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}",
             key="csv_view_select",
         )
-        df = load_csv(selected_csv)
+        df = sort_by_priority(load_csv(selected_csv))
         counts = get_status_counts(df)
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -425,8 +442,8 @@ with tab_csv:
         with col_a:
             status_filter = st.multiselect("状态筛选", STATUS_OPTIONS, default=["pending", "sent", "skipped", "failed"])
         with col_b:
-            tier_options = sorted([q for q in df["growth_tier"].unique().tolist() if q])
-            tier_filter = st.multiselect("增长等级", tier_options, default=tier_options)
+            tier_options = sorted([q for q in df["send_priority_tier"].unique().tolist() if q])
+            priority_filter = st.multiselect("发送优先级", tier_options, default=tier_options)
         with col_c:
             angle_options = sorted([q for q in df["outreach_angle"].unique().tolist() if q])
             angle_filter = st.multiselect("外联角度", angle_options, default=angle_options)
@@ -436,16 +453,18 @@ with tab_csv:
         filtered = df.copy()
         if status_filter:
             filtered = filtered[filtered["status"].replace("", "pending").isin(status_filter)]
-        if tier_filter:
-            filtered = filtered[filtered["growth_tier"].isin(tier_filter)]
+        if priority_filter:
+            filtered = filtered[filtered["send_priority_tier"].isin(priority_filter)]
         if angle_filter:
             filtered = filtered[filtered["outreach_angle"].isin(angle_filter)]
         if keyword.strip():
             kw = keyword.strip().lower()
             joined = filtered.astype(str).agg(" ".join, axis=1).str.lower()
             filtered = filtered[joined.str.contains(kw, na=False)]
+        filtered = sort_by_priority(filtered)
 
         display_cols = [
+            "send_priority_score", "send_priority_tier", "send_priority_reason",
             "growth_score", "growth_tier", "website_maturity_score", "website_maturity_tier", "outreach_angle",
             "growth_reason", "dynamic_email_intro", "lead_id", "business_name", "email", "email_quality",
             "status", "sent_at", "website_has_booking", "website_has_phone_cta", "website_has_reviews",
@@ -475,6 +494,7 @@ with tab_send:
         status_to_show = st.multiselect("显示哪些状态", STATUS_OPTIONS, default=["pending", "failed"], key="send_status_filter")
         candidate_df = send_df[send_df["status"].replace("", "pending").isin(status_to_show)].copy()
         candidate_df = candidate_df[candidate_df["email"].astype(str).str.len() > 0]
+        candidate_df = sort_by_priority(candidate_df)
 
         if candidate_df.empty:
             st.info("当前筛选条件下没有可操作的邮箱。")
@@ -494,6 +514,8 @@ with tab_send:
                 st.write("原始店名：", row.get("business_name", ""))
                 st.write("邮箱：", row.get("email", ""))
                 st.write("状态：", row.get("status", "pending"))
+                st.write("发送优先级：", row.get("send_priority_score", ""), row.get("send_priority_tier", ""))
+                st.write("优先级原因：", row.get("send_priority_reason", ""))
                 st.write("增长分：", row.get("growth_score", ""), row.get("growth_tier", ""))
                 st.write("网站成熟度：", row.get("website_maturity_score", ""), row.get("website_maturity_tier", ""))
                 st.write("外联角度：", row.get("outreach_angle", ""))
@@ -576,11 +598,11 @@ with tab_search:
                 matches.append(matched)
 
         if matches:
-            result_df = pd.concat(matches, ignore_index=True)
+            result_df = sort_by_priority(pd.concat(matches, ignore_index=True))
             show_cols = [
-                "csv_file", "growth_score", "growth_tier", "website_maturity_score", "outreach_angle",
-                "growth_reason", "lead_id", "business_name", "email", "status", "sent_at",
-                "website", "phone", "address",
+                "csv_file", "send_priority_score", "send_priority_tier", "growth_score", "growth_tier",
+                "website_maturity_score", "outreach_angle", "growth_reason", "lead_id", "business_name",
+                "email", "status", "sent_at", "website", "phone", "address",
             ]
             show_cols = [c for c in show_cols if c in result_df.columns]
             st.dataframe(result_df[show_cols], use_container_width=True, height=420)
