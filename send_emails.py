@@ -40,6 +40,9 @@ DIAGNOSTIC_BASE_URL = "https://local-business-test.vercel.app/"
 # 发信间隔（秒）—— 避免短时间内大量发信触发 Gmail 限流/垃圾邮件检测
 SEND_DELAY_SECONDS = 8
 
+# SMTP 连接超时时间（秒）—— 避免网络卡住时整个脚本长时间无响应
+SMTP_TIMEOUT_SECONDS = 30
+
 
 # ============================================================
 # 商家名称清洗：去掉 Google Maps / 法人名称里常见的公司后缀
@@ -113,11 +116,8 @@ def generate_fallback_lead_id(business_name: str, website: str) -> str:
 # 发信核心函数
 # ============================================================
 
-def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> bool:
-    """
-    通过 Gmail SMTP 发送一封HTML邮件，返回是否成功。
-    multipart/alternative 会同时带纯文本备用版本和HTML按钮版本。
-    """
+def build_email_message(to_email: str, subject: str, text_body: str, html_body: str) -> MIMEMultipart:
+    """构建同时包含纯文本备用版本和HTML按钮版本的邮件。"""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = formataddr((SENDER_DISPLAY_NAME, GMAIL_SENDER))
@@ -126,15 +126,46 @@ def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> b
     # 顺序很重要：先plain，再html；支持HTML的邮箱客户端会优先展示最后的HTML版本
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
+    return msg
+
+
+def send_via_starttls(to_email: str, msg: MIMEMultipart) -> bool:
+    """优先使用 Gmail 587 STARTTLS。"""
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=SMTP_TIMEOUT_SECONDS) as server:
+        server.starttls()
+        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER, [to_email], msg.as_string())
+    return True
+
+
+def send_via_ssl(to_email: str, msg: MIMEMultipart) -> bool:
+    """587 端口连接失败时，回退使用 Gmail 465 SSL。"""
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT_SECONDS) as server:
+        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER, [to_email], msg.as_string())
+    return True
+
+
+def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> bool:
+    """
+    通过 Gmail SMTP 发送一封HTML邮件，返回是否成功。
+    - 先尝试 587 STARTTLS
+    - 如果网络/端口超时，再尝试 465 SSL
+    - 如果仍失败，返回 False，不让整个脚本崩掉
+    """
+    msg = build_email_message(to_email, subject, text_body, html_body)
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_SENDER, [to_email], msg.as_string())
-        return True
-    except smtplib.SMTPException as e:
-        print(f"    发送失败: {e}")
+        return send_via_starttls(to_email, msg)
+    except (smtplib.SMTPException, TimeoutError, OSError) as e:
+        print(f"    587端口发送失败或连接超时: {e}")
+        print("    正在尝试465 SSL端口...")
+
+    try:
+        return send_via_ssl(to_email, msg)
+    except (smtplib.SMTPException, TimeoutError, OSError) as e:
+        print(f"    465端口也失败: {e}")
+        print("    这通常是网络、防火墙、VPN、公司/校园网络或运营商阻断SMTP导致。")
         return False
 
 
@@ -285,7 +316,7 @@ def main():
                 print("    已发送 ✓\n")
             else:
                 row["status"] = "failed"
-                print("    发送失败，已标记\n")
+                print("    发送失败，已标记；程序继续处理下一条\n")
             time.sleep(SEND_DELAY_SECONDS)
         else:
             print("    无效输入，按跳过处理\n")
