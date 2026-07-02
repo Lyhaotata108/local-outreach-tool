@@ -5,6 +5,7 @@ Step 2: 读取 scrape_leads.py 生成的 CSV，逐条人工确认后发送外联
 发信前需要设置环境变量：
   export GMAIL_SENDER="youraccount@gmail.com"
   export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"   # Gmail App Password，不是登录密码
+  export SENDER_DISPLAY_NAME="Foxiren Growth Check" # 可选，控制收件人看到的发件人名称
 
 依赖：
   pip install requests   (已在 scrape_leads.py 用过，这里只用标准库 smtplib)
@@ -14,11 +15,13 @@ import argparse
 import csv
 import hashlib
 import os
+import re
 import smtplib
 import time
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from urllib.parse import urlencode, urlparse
 
 from email_templates import render_subject, render_body, render_html_body
@@ -29,12 +32,54 @@ from email_templates import render_subject, render_body, render_html_body
 
 GMAIL_SENDER = os.environ.get("GMAIL_SENDER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+SENDER_DISPLAY_NAME = os.environ.get("SENDER_DISPLAY_NAME", "Foxiren Growth Check")
 
 # 诊断工具的基础链接，发信时会自动拼接 lead_id 方便追踪
 DIAGNOSTIC_BASE_URL = "https://local-business-test.vercel.app/"
 
 # 发信间隔（秒）—— 避免短时间内大量发信触发 Gmail 限流/垃圾邮件检测
 SEND_DELAY_SECONDS = 8
+
+
+# ============================================================
+# 商家名称清洗：去掉 Google Maps / 法人名称里常见的公司后缀
+# 例如：Orlando Spa Oasis Limited Liability Company -> Orlando Spa Oasis
+# ============================================================
+
+LEGAL_SUFFIX_PATTERNS = [
+    r"limited liability company",
+    r"l\.l\.c\.",
+    r"llc",
+    r"incorporated",
+    r"inc\.",
+    r"inc",
+    r"corporation",
+    r"corp\.",
+    r"corp",
+    r"company",
+    r"co\.",
+    r"ltd\.",
+    r"ltd",
+]
+
+
+def clean_business_name(name: str) -> str:
+    """把法人后缀清掉，让标题和正文更像真人写的。"""
+    cleaned = " ".join((name or "").strip().split())
+    if not cleaned:
+        return "your business"
+
+    # 去掉末尾括号信息，例如 "ABC Spa (Orlando)" -> "ABC Spa"
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip()
+
+    changed = True
+    while changed:
+        before = cleaned
+        for pattern in LEGAL_SUFFIX_PATTERNS:
+            cleaned = re.sub(rf"\s*,?\s+{pattern}\.?\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+        changed = cleaned != before
+
+    return cleaned or name or "your business"
 
 
 # ============================================================
@@ -75,7 +120,7 @@ def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> b
     """
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = GMAIL_SENDER
+    msg["From"] = formataddr((SENDER_DISPLAY_NAME, GMAIL_SENDER))
     msg["To"] = to_email
 
     # 顺序很重要：先plain，再html；支持HTML的邮箱客户端会优先展示最后的HTML版本
@@ -154,6 +199,7 @@ def main():
         print("先去 Gmail 账号设置 → 安全性 → App Passwords 生成一个专用密码，再执行：")
         print("  export GMAIL_SENDER='youraccount@gmail.com'")
         print("  export GMAIL_APP_PASSWORD='xxxx xxxx xxxx xxxx'")
+        print("  export SENDER_DISPLAY_NAME='Foxiren Growth Check'  # 可选")
         return
 
     if not os.path.exists(args.file):
@@ -176,13 +222,16 @@ def main():
     skipped_count = 0
 
     for i, row in enumerate(pending_rows, 1):
-        business_name = row["business_name"]
+        raw_business_name = row["business_name"]
+        business_name = clean_business_name(raw_business_name)
         email = row["email"]
         quality = row["email_quality"]
-        lead_id = row.get("lead_id") or generate_fallback_lead_id(business_name, row.get("website", ""))
+        lead_id = row.get("lead_id") or generate_fallback_lead_id(raw_business_name, row.get("website", ""))
         row["lead_id"] = lead_id
 
-        print(f"[{i}/{len(pending_rows)}] {business_name}")
+        print(f"[{i}/{len(pending_rows)}] {raw_business_name}")
+        if business_name != raw_business_name:
+            print(f"    显示名称: {business_name}")
         print(f"    Lead ID: {lead_id}")
         print(f"    邮箱: {email} (质量: {quality})")
 
@@ -208,9 +257,10 @@ def main():
             industry=args.industry,
         )
 
+        print(f"    发件人显示: {SENDER_DISPLAY_NAME} <{GMAIL_SENDER}>")
         print(f"    标题: {subject}")
         print("    --- 正文预览（客户会优先看到HTML按钮版）---")
-        print("    按钮文案: View My Free Diagnostic")
+        print("    按钮文案: View My Free Growth Check")
         print(f"    按钮链接: {diagnostic_link}")
         print("    纯文本备用正文:")
         print("    " + body.replace("\n", "\n    "))
