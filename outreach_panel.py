@@ -4,6 +4,7 @@
 
 功能：
 - 从界面运行 scrape_leads.py 抓取线索
+- 内置城市池，不用手动记城市
 - 查看 leads_output 里的 CSV
 - 统计 pending / sent / skipped / failed 状态
 - 预览每条外联邮件
@@ -25,6 +26,40 @@ import streamlit.components.v1 as components
 
 BASE_DIR = Path(__file__).resolve().parent
 LEADS_DIR = BASE_DIR / "leads_output"
+
+CITY_PRESETS: dict[str, list[tuple[str, str]]] = {
+    "自定义城市": [],
+    "第一轮测试：按摩/SPA 10城": [
+        ("Orlando", "FL"), ("Tampa", "FL"), ("Miami", "FL"),
+        ("Houston", "TX"), ("Dallas", "TX"), ("Austin", "TX"), ("Plano", "TX"),
+        ("Los Angeles", "CA"), ("Irvine", "CA"), ("Pasadena", "CA"),
+    ],
+    "Florida：按摩/SPA 城市池": [
+        ("Orlando", "FL"), ("Tampa", "FL"), ("Miami", "FL"), ("Jacksonville", "FL"),
+        ("Fort Lauderdale", "FL"), ("St. Petersburg", "FL"), ("Kissimmee", "FL"),
+        ("Sarasota", "FL"), ("West Palm Beach", "FL"), ("Naples", "FL"),
+    ],
+    "Texas：按摩/SPA 城市池": [
+        ("Houston", "TX"), ("Dallas", "TX"), ("Austin", "TX"), ("San Antonio", "TX"),
+        ("Plano", "TX"), ("Frisco", "TX"), ("Irving", "TX"), ("Arlington", "TX"),
+        ("Fort Worth", "TX"), ("Sugar Land", "TX"),
+    ],
+    "California：按摩/SPA 城市池": [
+        ("Los Angeles", "CA"), ("San Diego", "CA"), ("Irvine", "CA"), ("Pasadena", "CA"),
+        ("Anaheim", "CA"), ("Torrance", "CA"), ("San Jose", "CA"), ("Fremont", "CA"),
+        ("Sacramento", "CA"), ("Riverside", "CA"),
+    ],
+    "Northeast / Midwest：补充测试城市池": [
+        ("Boston", "MA"), ("Quincy", "MA"), ("Edison", "NJ"), ("Jersey City", "NJ"),
+        ("Flushing", "NY"), ("Philadelphia", "PA"), ("Chicago", "IL"), ("Naperville", "IL"),
+        ("Ann Arbor", "MI"), ("Columbus", "OH"),
+    ],
+    "West / Mountain：补充测试城市池": [
+        ("Las Vegas", "NV"), ("Henderson", "NV"), ("Phoenix", "AZ"), ("Scottsdale", "AZ"),
+        ("Denver", "CO"), ("Aurora", "CO"), ("Salt Lake City", "UT"), ("Bellevue", "WA"),
+        ("Portland", "OR"), ("Boise", "ID"),
+    ],
+}
 
 
 # ============================================================
@@ -67,7 +102,6 @@ st.set_page_config(
     page_icon="📬",
     layout="wide",
 )
-
 
 CUSTOM_CSS = """
 <style>
@@ -182,6 +216,27 @@ def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, 
     return business_name, subject, text_body, html_body, diagnostic_link
 
 
+def run_scrape_command(industry: str, city: str, state: str, limit: int, dedupe_existing: bool) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        sys.executable,
+        str(BASE_DIR / "scrape_leads.py"),
+        "--industry", industry,
+        "--city", city,
+        "--state", state,
+        "--limit", str(limit),
+    ]
+    if not dedupe_existing:
+        cmd.append("--no-dedupe-existing")
+
+    return subprocess.run(
+        cmd,
+        cwd=str(BASE_DIR),
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+    )
+
+
 # ============================================================
 # 侧边栏：配置状态
 # ============================================================
@@ -200,7 +255,6 @@ with st.sidebar:
     st.divider()
     st.caption("配置文件路径")
     st.code(str(BASE_DIR / ".env"), language="text")
-
     st.caption("如果刚改了 .env，重启面板最稳。")
 
 
@@ -222,47 +276,72 @@ tab_scrape, tab_csv, tab_send, tab_search = st.tabs([
 
 with tab_scrape:
     st.subheader("抓取本地商家")
-    st.write("这里会调用现有的 `scrape_leads.py`，输出仍然保存到 `leads_output/`。")
+    st.write("这里会调用现有的 `scrape_leads.py`，输出仍然保存到 `leads_output/`。默认会对历史 CSV 去重。")
 
-    col1, col2, col3, col4 = st.columns([2, 1.5, 1, 1])
-    with col1:
+    preset_name = st.selectbox("城市池", list(CITY_PRESETS.keys()), index=1)
+    preset_cities = CITY_PRESETS[preset_name]
+
+    col_top1, col_top2, col_top3 = st.columns([1.5, 1, 1])
+    with col_top1:
         industry = st.text_input("行业关键词", value="massage spa")
-    with col2:
-        city = st.text_input("城市", value="Orlando")
-    with col3:
-        state = st.text_input("州", value="FL")
-    with col4:
-        limit = st.number_input("数量", min_value=1, max_value=200, value=20, step=1)
+    with col_top2:
+        limit = st.number_input("每个城市抓取数量", min_value=1, max_value=200, value=20, step=1)
+    with col_top3:
+        dedupe_existing = st.checkbox("启用历史CSV去重", value=True)
+
+    if preset_cities:
+        city_labels = [f"{city}, {state}" for city, state in preset_cities]
+        selected_label = st.selectbox("选择城市", city_labels, index=0)
+        selected_index = city_labels.index(selected_label)
+        city, state = preset_cities[selected_index]
+        batch_mode = st.checkbox("批量抓取整个城市池", value=False)
+        target_cities = preset_cities if batch_mode else [(city, state)]
+        st.caption(f"当前目标：{len(target_cities)} 个城市。历史去重开启后，已经抓过的商家会自动跳过。")
+    else:
+        col_city, col_state = st.columns([2, 1])
+        with col_city:
+            city = st.text_input("城市", value="Orlando")
+        with col_state:
+            state = st.text_input("州", value="FL")
+        batch_mode = False
+        target_cities = [(city, state)]
 
     if st.button("开始抓取", type="primary"):
         if not os.environ.get("GOOGLE_PLACES_API_KEY"):
             st.error("未检测到 GOOGLE_PLACES_API_KEY。请先在 .env 里配置，或在终端 export 后重启面板。")
         else:
-            cmd = [
-                sys.executable,
-                str(BASE_DIR / "scrape_leads.py"),
-                "--industry", industry,
-                "--city", city,
-                "--state", state,
-                "--limit", str(limit),
-            ]
-            st.code(" ".join(cmd), language="bash")
-            with st.spinner("正在抓取，请稍等..."):
-                result = subprocess.run(
-                    cmd,
-                    cwd=str(BASE_DIR),
-                    env=os.environ.copy(),
-                    capture_output=True,
-                    text=True,
-                )
-            if result.stdout:
-                st.text_area("输出", result.stdout, height=220)
-            if result.stderr:
-                st.text_area("错误/警告", result.stderr, height=160)
-            if result.returncode == 0:
+            all_stdout: list[str] = []
+            all_stderr: list[str] = []
+            failed_count = 0
+
+            progress = st.progress(0)
+            status_box = st.empty()
+
+            for idx, (run_city, run_state) in enumerate(target_cities, 1):
+                status_box.info(f"正在抓取 {idx}/{len(target_cities)}：{run_city}, {run_state}")
+                with st.spinner(f"正在抓取 {run_city}, {run_state}..."):
+                    result = run_scrape_command(industry, run_city, run_state, int(limit), dedupe_existing)
+
+                header = f"\n========== {run_city}, {run_state} =========="
+                if result.stdout:
+                    all_stdout.append(header + "\n" + result.stdout)
+                if result.stderr:
+                    all_stderr.append(header + "\n" + result.stderr)
+                if result.returncode != 0:
+                    failed_count += 1
+
+                progress.progress(idx / len(target_cities))
+
+            status_box.empty()
+            if all_stdout:
+                st.text_area("输出", "\n".join(all_stdout), height=320)
+            if all_stderr:
+                st.text_area("错误/警告", "\n".join(all_stderr), height=180)
+
+            if failed_count == 0:
                 st.success("抓取完成。去 ② 查看CSV 里选择最新文件。")
             else:
-                st.error(f"抓取脚本退出码：{result.returncode}")
+                st.error(f"有 {failed_count} 个城市抓取失败，请看错误输出。")
 
 
 # ------------------------------------------------------------
