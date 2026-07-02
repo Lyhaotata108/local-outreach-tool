@@ -3,7 +3,7 @@
 本项目用于本地实体服务店铺外联获客：
 
 ```text
-抓取本地商家 → 抓取网站邮箱 → 自动去重 → 增长机会评分 → 网站成熟度判断 → 动态邮件话术 → 人工确认发送 → 通过 lead_id 追踪
+抓取本地商家 → 抓取网站邮箱 → 自动去重 → 增长机会评分 → 发送优先级排序 → 网站成熟度判断 → 动态邮件话术 → 人工确认发送 → 通过 lead_id 追踪
 ```
 
 配套诊断工具：`https://local-business-test.vercel.app/`
@@ -13,7 +13,7 @@
 ```text
 local-outreach-tool/
 ├── outreach_panel.py     # 本地可视化操作面板（推荐使用）
-├── run_scrape.py         # 自动读取 .env，运行抓取，并做增长机会评分/筛选
+├── run_scrape.py         # 自动读取 .env，运行抓取，并做增长机会评分/筛选/排序
 ├── scrape_leads.py       # Step 1：抓商家 + 抓邮箱 + 历史去重 + 生成CSV
 ├── send_emails.py        # Step 2：读取CSV + 人工确认 + Gmail发送
 ├── email_templates.py    # 邮件标题与正文模板，支持动态开场白
@@ -69,7 +69,7 @@ python3 -m streamlit run outreach_panel.py
 
 ```text
 ① 抓取线索：选择城市池，填写行业、数量，运行 run_scrape.py
-② 查看CSV：查看 leads_output 里的所有线索，筛选状态、增长等级、外联角度
+② 查看CSV：查看 leads_output 里的所有线索，筛选状态、发送优先级、外联角度
 ③ 预览/发送邮件：选择单条线索，预览动态HTML邮件，点击发送并自动回写CSV状态
 ④ lead_id 搜索：收到诊断提交后，用 Outreach Lead ID 反查原始商家
 ⑤ Blocklist：管理不要再联系的邮箱/网站
@@ -88,11 +88,14 @@ West / Mountain：补充测试城市池
 
 你可以单独选择一个城市，也可以勾选“批量抓取整个城市池”。面板运行在你自己的 Mac 本地，密钥仍然只在本机 `.env` 里，不会上传到服务器。
 
-## 4. 增长机会评分
+## 4. 增长机会评分与发送优先级
 
 `run_scrape.py` 会对新 CSV 自动新增这些字段：
 
 ```text
+send_priority_score
+send_priority_tier
+send_priority_reason
 growth_score
 growth_tier
 growth_reason
@@ -121,6 +124,37 @@ website_scan_status
 疑似连锁/企业品牌 = 降权或跳过
 blocklist 中的邮箱/网站 = 直接跳过
 ```
+
+发送优先级不是简单按最低评分或最低评论排序，而是综合：
+
+```text
+外联角度：new_business_growth / review_growth / website_conversion 等
+增长分：growth_score
+评分与评论组合：高评分新店、小而稳定的评论基础、合理评论缺口
+邮箱质量：good 邮箱优先，generic 邮箱降权
+网站成熟度：成熟大站降权，低成熟度但有机会的店提高优先级
+连锁/企业品牌：大幅降权
+```
+
+发送优先级等级：
+
+```text
+first
+high
+medium
+low
+skip
+```
+
+CSV 输出时会自动按：
+
+```text
+send_priority_score 从高到低
+growth_score 从高到低
+good 邮箱优先
+```
+
+排序。面板的“查看CSV”和“预览/发送邮件”也会优先显示最值得先发的商户。
 
 常见外联角度：
 
@@ -168,10 +202,10 @@ outreach_angle = new_business_growth
 
 ## 6. 命令行方式：抓取线索
 
-推荐用 `run_scrape.py`，它会自动读取 `.env`，并做增长机会评分：
+推荐用 `run_scrape.py`，它会自动读取 `.env`，并做增长机会评分与发送优先级排序：
 
 ```bash
-python3 run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20 --min-rating 4.0 --min-reviews 10 --min-growth-score 60
+python3 run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20 --min-rating 4.0 --min-reviews 1 --min-growth-score 60
 ```
 
 如果你确实想重新抓旧线索，可以加：
