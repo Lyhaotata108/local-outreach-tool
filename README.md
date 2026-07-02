@@ -115,6 +115,7 @@ website_scan_status
 
 ```text
 评分不错 + 评论还有增长空间 + 有网站 + 能联系到 + 像独立商户 = 加分
+高评分新店（评论 1-9 条、评分 4.5+）= 归类为 new_business_growth，不会被最低评论数规则误杀
 网站缺少预约/电话/评价/优惠/复购入口 = 加分
 网站成熟且评论很多 = 降权或跳过
 疑似连锁/企业品牌 = 降权或跳过
@@ -124,6 +125,7 @@ blocklist 中的邮箱/网站 = 直接跳过
 常见外联角度：
 
 ```text
+new_business_growth
 review_growth
 website_conversion
 repeat_booking
@@ -132,6 +134,25 @@ general_growth
 skip_mature_business
 skip_chain_or_corporate
 ```
+
+### 新店增长逻辑
+
+如果商户满足：
+
+```text
+评论数：1-9 条
+评分：4.5+
+有网站 / 有邮箱
+不是明显连锁品牌
+```
+
+会被优先识别为：
+
+```text
+outreach_angle = new_business_growth
+```
+
+这种线索的邮件会强调“早期评分不错，下一步需要更多评论、本地曝光和预约转化”，而不是说“网站有问题”。
 
 ## 5. Blocklist / 不要再联系
 
