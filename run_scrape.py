@@ -1,5 +1,5 @@
 """
-自动读取本地 .env 后再运行 scrape_leads.py，并对新生成的 CSV 做增长机会评分和二次筛选。
+自动读取本地 .env 后再运行 scrape_leads.py，并对新生成的 CSV 做增长机会评分、网站成熟度判断、话术角度分配和二次筛选。
 
 用法示例：
 python run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20
@@ -19,13 +19,15 @@ from pathlib import Path
 
 import requests
 
+from blocklist_utils import is_blocked
+
 BASE_DIR = Path(__file__).resolve().parent
 LEADS_DIR = BASE_DIR / "leads_output"
 WEBSITE_SCAN_TIMEOUT = 8
 
 BOOKING_KEYWORDS = [
     "book now", "book online", "book appointment", "schedule", "appointment", "reserve", "reservation",
-    "booking", "make an appointment", "online booking", "request appointment",
+    "booking", "make an appointment", "online booking", "request appointment", "mindbody", "vagaro", "square appointments",
 ]
 PHONE_CTA_KEYWORDS = [
     "tel:", "call now", "tap to call", "call us", "phone", "contact us",
@@ -36,9 +38,15 @@ REVIEW_KEYWORDS = [
 OFFER_KEYWORDS = [
     "special", "specials", "coupon", "discount", "deal", "promotion", "gift card", "membership", "package", "packages",
 ]
+GIFT_MEMBERSHIP_KEYWORDS = [
+    "gift card", "gift cards", "membership", "memberships", "loyalty", "monthly plan", "package", "packages",
+]
+LOCAL_SEO_KEYWORDS = [
+    "near me", "serving", "service area", "locations", "areas served", "city", "neighborhood",
+]
 CHAIN_KEYWORDS = [
     "massage envy", "hand and stone", "hand & stone", "elements massage", "the now massage",
-    "spavia", "woodhouse", "massage heights", "franchise", "corporate", "locations", "careers",
+    "spavia", "woodhouse", "massage heights", "franchise", "corporate", "careers",
 ]
 
 
@@ -131,19 +139,105 @@ def analyze_website(row: dict) -> dict[str, str]:
     has_phone_cta = contains_any(combined, PHONE_CTA_KEYWORDS)
     has_reviews = contains_any(combined, REVIEW_KEYWORDS)
     has_offer = contains_any(combined, OFFER_KEYWORDS)
+    has_gift_membership = contains_any(combined, GIFT_MEMBERSHIP_KEYWORDS)
+    has_local_seo = contains_any(combined, LOCAL_SEO_KEYWORDS)
     is_chain = contains_any(combined, CHAIN_KEYWORDS)
+
+    link_count = html_text.count("href=") if html_text else 0
+    has_multi_page_structure = link_count >= 12
 
     return {
         "website_has_booking": "yes" if has_booking else "no",
         "website_has_phone_cta": "yes" if has_phone_cta else "no",
         "website_has_reviews": "yes" if has_reviews else "no",
         "website_has_offer": "yes" if has_offer else "no",
+        "website_has_gift_or_membership": "yes" if has_gift_membership else "no",
+        "website_has_local_seo_signals": "yes" if has_local_seo else "no",
+        "website_has_multi_page_structure": "yes" if has_multi_page_structure else "no",
         "is_likely_chain": "yes" if is_chain else "no",
         "website_scan_status": scan_status,
     }
 
 
-def calculate_growth_score(row: dict, signals: dict[str, str]) -> tuple[int, str, str]:
+def calculate_website_maturity_score(signals: dict[str, str]) -> tuple[int, str]:
+    score = 0
+    if signals.get("website_scan_status") == "ok":
+        score += 10
+    if signals.get("website_has_booking") == "yes":
+        score += 20
+    if signals.get("website_has_phone_cta") == "yes":
+        score += 15
+    if signals.get("website_has_reviews") == "yes":
+        score += 15
+    if signals.get("website_has_offer") == "yes":
+        score += 15
+    if signals.get("website_has_gift_or_membership") == "yes":
+        score += 10
+    if signals.get("website_has_multi_page_structure") == "yes":
+        score += 10
+    if signals.get("website_has_local_seo_signals") == "yes":
+        score += 5
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        tier = "mature"
+    elif score >= 55:
+        tier = "developing"
+    else:
+        tier = "weak"
+    return score, tier
+
+
+def choose_outreach_angle(row: dict, signals: dict[str, str], maturity_score: int) -> str:
+    rating = parse_float(row.get("google_rating", ""))
+    reviews = parse_int(row.get("review_count", ""))
+
+    if signals.get("is_likely_chain") == "yes":
+        return "skip_chain_or_corporate"
+    if maturity_score >= 80 and reviews >= 500:
+        return "skip_mature_business"
+    if reviews < 150 and rating >= 4.0:
+        return "review_growth"
+    if signals.get("website_has_booking") == "no" or signals.get("website_has_phone_cta") == "no":
+        return "website_conversion"
+    if signals.get("website_has_gift_or_membership") == "no" or signals.get("website_has_offer") == "no":
+        return "repeat_booking"
+    if signals.get("website_has_local_seo_signals") == "no":
+        return "local_seo"
+    return "general_growth"
+
+
+def build_dynamic_intro(outreach_angle: str, signals: dict[str, str], maturity_score: int) -> str:
+    if outreach_angle == "review_growth":
+        if maturity_score >= 70:
+            return "Your website already looks fairly polished, but there may still be room to grow reviews, local visibility, and trust compared with nearby competitors."
+        return "You appear to have a solid customer foundation, but the review count and local trust signals may still have room to grow."
+
+    if outreach_angle == "website_conversion":
+        missing = []
+        if signals.get("website_has_booking") == "no":
+            missing.append("a clear booking path")
+        if signals.get("website_has_phone_cta") == "no":
+            missing.append("a strong mobile call button")
+        detail = " and ".join(missing) or "a few conversion points"
+        return f"You already have an online presence, but the website may be missing {detail}, which can matter a lot for mobile visitors ready to book."
+
+    if outreach_angle == "repeat_booking":
+        return "Your online presence has a good foundation, but I did not see many clear repeat-booking hooks such as packages, gift cards, memberships, or limited-time offers."
+
+    if outreach_angle == "local_seo":
+        return "Your business has a foundation online, but there may be room to strengthen local search visibility and make it clearer why customers nearby should choose you."
+
+    if outreach_angle == "skip_mature_business":
+        return "Your online presence already appears mature, so this is likely lower priority unless you are specifically looking for more review growth or local visibility."
+
+    if outreach_angle == "skip_chain_or_corporate":
+        return "This business appears to be part of a larger brand or corporate structure, so it may not be the best fit for small-business growth outreach."
+
+    return "A lot of local service businesses lose customers not because of marketing budget, but because of small gaps in visibility, trust, website conversion, offers, or repeat-customer strategy."
+
+
+def calculate_growth_score(row: dict, signals: dict[str, str], maturity_score: int, outreach_angle: str) -> tuple[int, str, str]:
     rating = parse_float(row.get("google_rating", ""))
     reviews = parse_int(row.get("review_count", ""))
     email_quality = str(row.get("email_quality", "")).strip().lower()
@@ -191,7 +285,7 @@ def calculate_growth_score(row: dict, signals: dict[str, str]) -> tuple[int, str
         reasons.append("generic email")
 
     if signals.get("is_likely_chain") == "yes":
-        score -= 15
+        score -= 25
         reasons.append("likely chain or corporate brand")
     else:
         score += 10
@@ -213,6 +307,24 @@ def calculate_growth_score(row: dict, signals: dict[str, str]) -> tuple[int, str
     else:
         reasons.append("website could not be scanned")
 
+    if maturity_score >= 80 and reviews >= 500:
+        score -= 35
+        reasons.append("mature website and large review base")
+    elif maturity_score >= 80:
+        score -= 10
+        reasons.append("website already looks mature")
+    elif maturity_score < 55:
+        score += 8
+        reasons.append("website maturity looks low")
+
+    if outreach_angle == "review_growth":
+        score += 8
+        reasons.append("review growth angle")
+    elif outreach_angle == "skip_mature_business":
+        score = min(score, 35)
+    elif outreach_angle == "skip_chain_or_corporate":
+        score = min(score, 30)
+
     score = max(0, min(100, score))
     if score >= 80:
         tier = "hot"
@@ -223,13 +335,21 @@ def calculate_growth_score(row: dict, signals: dict[str, str]) -> tuple[int, str
     else:
         tier = "skip"
 
-    return score, tier, "; ".join(reasons[:6])
+    return score, tier, "; ".join(reasons[:7])
 
 
 def enrich_row_with_growth(row: dict) -> dict:
     signals = analyze_website(row)
-    score, tier, reason = calculate_growth_score(row, signals)
+    maturity_score, maturity_tier = calculate_website_maturity_score(signals)
+    outreach_angle = choose_outreach_angle(row, signals, maturity_score)
+    dynamic_intro = build_dynamic_intro(outreach_angle, signals, maturity_score)
+    score, tier, reason = calculate_growth_score(row, signals, maturity_score, outreach_angle)
+
     row.update(signals)
+    row["website_maturity_score"] = str(maturity_score)
+    row["website_maturity_tier"] = maturity_tier
+    row["outreach_angle"] = outreach_angle
+    row["dynamic_email_intro"] = dynamic_intro
     row["growth_score"] = str(score)
     row["growth_tier"] = tier
     row["growth_reason"] = reason
@@ -249,6 +369,13 @@ def row_matches_filters(
     email_quality = str(row.get("email_quality", "")).strip().lower()
     growth_score = parse_int(row.get("growth_score", ""))
 
+    blocked, blocked_reason = is_blocked(email=row.get("email", ""), website=row.get("website", ""), base_dir=BASE_DIR)
+    if blocked:
+        return False, blocked_reason
+
+    if row.get("outreach_angle") in {"skip_mature_business", "skip_chain_or_corporate"}:
+        return False, row.get("outreach_angle")
+
     if min_rating > 0 and rating < min_rating:
         return False, "评分不足"
 
@@ -267,6 +394,7 @@ def row_matches_filters(
         str(row.get("address", "")),
         str(row.get("email", "")),
         str(row.get("growth_reason", "")),
+        str(row.get("outreach_angle", "")),
     ]).lower()
     for keyword in exclude_keywords:
         if keyword and keyword in haystack:
@@ -290,20 +418,20 @@ def filter_csv_file(
 
     growth_fields = [
         "growth_score", "growth_tier", "growth_reason",
+        "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
         "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
+        "website_has_gift_or_membership", "website_has_local_seo_signals", "website_has_multi_page_structure",
         "is_likely_chain", "website_scan_status",
     ]
     for field in growth_fields:
         if field not in fieldnames:
             fieldnames.append(field)
 
-    enriched_rows = []
     kept_rows = []
     reason_counts: dict[str, int] = {}
 
     for row in rows:
         enriched = enrich_row_with_growth(row)
-        enriched_rows.append(enriched)
         keep, reason = row_matches_filters(
             enriched,
             min_rating=min_rating,
@@ -328,7 +456,9 @@ def filter_csv_file(
     print(f"  保留线索: {len(kept_rows)}")
     if kept_rows:
         avg_score = sum(parse_int(r.get("growth_score", "0")) for r in kept_rows) / len(kept_rows)
+        avg_maturity = sum(parse_int(r.get("website_maturity_score", "0")) for r in kept_rows) / len(kept_rows)
         print(f"  保留线索平均增长分: {avg_score:.1f}")
+        print(f"  保留线索平均网站成熟度: {avg_maturity:.1f}")
     if reason_counts:
         print("  过滤原因：")
         for reason, count in reason_counts.items():
