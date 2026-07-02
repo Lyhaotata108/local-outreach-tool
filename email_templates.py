@@ -4,6 +4,7 @@
   {business_name}  - 已清洗后的商家名称，例如 "Orlando Spa Oasis"
   {city}            - 城市，例如 "Orlando"
   {diagnostic_url}  - 诊断工具链接，建议带 lead_id 参数方便追踪
+  {custom_intro}    - 根据增长机会自动生成的一句个性化切入点
 """
 
 import html
@@ -18,18 +19,21 @@ SUBJECT_VARIANTS = [
     "Free 2-min local growth check for {business_name}",
 ]
 
+DEFAULT_CUSTOM_INTRO = (
+    "A lot of local service businesses lose customers not because of marketing budget, "
+    "but because of small gaps — things like unclear mobile calls-to-action, weak recent reviews, "
+    "confusing offers, missing trust signals, or no clear reason for customers to choose them over nearby competitors."
+)
 
 # ============================================================
 # 纯文本正文模板 — 作为HTML邮件的备用版本
-# 定位不只说网站，而是 local growth / online presence：
-# visibility、reviews/trust、conversion、offers、repeat customers、competition
 # ============================================================
 
 BODY_TEMPLATE = """Hi there,
 
 I came across {business_name} while looking at local {industry} businesses in {city}, and wanted to reach out.
 
-A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like unclear mobile calls-to-action, weak recent reviews, confusing offers, missing trust signals, or no clear reason for customers to choose them over nearby competitors.
+{custom_intro}
 
 I put together a free 2-minute local growth check that looks at online visibility, trust and reviews, website conversion, offers, repeat-customer opportunities, and nearby competition. No signup, no strings attached:
 
@@ -57,7 +61,7 @@ HTML_BODY_TEMPLATE = """<!doctype html>
       </p>
 
       <p style="margin:0 0 16px;">
-        A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like unclear mobile calls-to-action, weak recent reviews, confusing offers, missing trust signals, or no clear reason for customers to choose them over nearby competitors.
+        {custom_intro}
       </p>
 
       <p style="margin:0 0 18px;">
@@ -85,30 +89,49 @@ HTML_BODY_TEMPLATE = """<!doctype html>
 
 
 def render_subject(business_name: str, variant_index: int = 0) -> str:
-    """渲染标题，variant_index 用于轮换不同版本"""
+    """渲染标题，variant_index 用于轮换不同版本。"""
     template = SUBJECT_VARIANTS[variant_index % len(SUBJECT_VARIANTS)]
     return template.format(business_name=business_name)
 
 
-def render_body(business_name: str, city: str, diagnostic_url: str,
-                 industry: str = "service", sender_name: str = "Foxiren") -> str:
-    """渲染纯文本正文，作为HTML邮件的备用版本"""
+def normalize_custom_intro(custom_intro: str | None = None) -> str:
+    intro = " ".join((custom_intro or "").strip().split())
+    return intro or DEFAULT_CUSTOM_INTRO
+
+
+def render_body(
+    business_name: str,
+    city: str,
+    diagnostic_url: str,
+    industry: str = "service",
+    sender_name: str = "Foxiren",
+    custom_intro: str | None = None,
+) -> str:
+    """渲染纯文本正文，作为HTML邮件的备用版本。"""
     return BODY_TEMPLATE.format(
         business_name=business_name,
         city=city,
         diagnostic_url=diagnostic_url,
         industry=industry,
         sender_name=sender_name,
+        custom_intro=normalize_custom_intro(custom_intro),
     )
 
 
-def render_html_body(business_name: str, city: str, diagnostic_url: str,
-                     industry: str = "service", sender_name: str = "Foxiren") -> str:
-    """渲染HTML正文，客户在Gmail等主流邮箱里看到的是按钮版"""
+def render_html_body(
+    business_name: str,
+    city: str,
+    diagnostic_url: str,
+    industry: str = "service",
+    sender_name: str = "Foxiren",
+    custom_intro: str | None = None,
+) -> str:
+    """渲染HTML正文，客户在Gmail等主流邮箱里看到的是按钮版。"""
     return HTML_BODY_TEMPLATE.format(
         business_name=html.escape(business_name or ""),
         city=html.escape(city or "your area"),
         diagnostic_url=html.escape(diagnostic_url or "", quote=True),
         industry=html.escape(industry or "service"),
         sender_name=html.escape(sender_name or "Foxiren"),
+        custom_intro=html.escape(normalize_custom_intro(custom_intro)),
     )
