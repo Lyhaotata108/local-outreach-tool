@@ -1,41 +1,41 @@
 """
 外联邮件模板
 变量说明：
-  {business_name}  - 商家名称，例如 "Yellowstone Spa Massage"
-  {city}            - 城市，例如 "Concord"
+  {business_name}  - 已清洗后的商家名称，例如 "Orlando Spa Oasis"
+  {city}            - 城市，例如 "Orlando"
   {diagnostic_url}  - 诊断工具链接，建议带 lead_id 参数方便追踪
 """
 
 import html
 
 # ============================================================
-# 标题（Subject Line）— 决定打开率，必须具体、非推销语气
-# 提供3个版本，建议轮换测试（A/B test），避免大量重复标题被Gmail判定群发/垃圾邮件
+# 标题（Subject Line）— 具体、低压力、避免过度营销
 # ============================================================
 
 SUBJECT_VARIANTS = [
-    "Quick question about {business_name}",
-    "Noticed something about {business_name}'s online presence",
-    "Free 2-min check for {business_name} — worth a look?",
+    "Quick local growth check for {business_name}",
+    "Small online presence check for {business_name}",
+    "Free 2-min local growth check for {business_name}",
 ]
 
 
 # ============================================================
 # 纯文本正文模板 — 作为HTML邮件的备用版本
-# 大多数邮箱客户端会优先显示HTML按钮版；少数不支持HTML的客户端才会看到这个版本
+# 定位不只说网站，而是 local growth / online presence：
+# visibility、reviews/trust、conversion、offers、repeat customers、competition
 # ============================================================
 
 BODY_TEMPLATE = """Hi there,
 
 I came across {business_name} while looking at local {industry} businesses in {city}, and wanted to reach out.
 
-A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like a missing "Call Now" button on mobile, not enough recent Google reviews, or no clear reason for customers to choose them over nearby competitors.
+A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like unclear mobile calls-to-action, weak recent reviews, confusing offers, missing trust signals, or no clear reason for customers to choose them over nearby competitors.
 
-I put together a free 2-minute diagnostic that checks exactly this — visibility, trust, website conversion, offers, repeat customers, and how you compare to nearby competitors. No signup, no strings attached:
+I put together a free 2-minute local growth check that looks at online visibility, trust and reviews, website conversion, offers, repeat-customer opportunities, and nearby competition. No signup, no strings attached:
 
 {diagnostic_url}
 
-If it's not useful, no worries at all — feel free to ignore this.
+If this is not relevant, just reply "no" and I won't follow up.
 
 Best,
 {sender_name}
@@ -57,21 +57,21 @@ HTML_BODY_TEMPLATE = """<!doctype html>
       </p>
 
       <p style="margin:0 0 16px;">
-        A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like a missing <strong>"Call Now"</strong> button on mobile, not enough recent Google reviews, or no clear reason for customers to choose them over nearby competitors.
+        A lot of local service businesses lose customers not because of marketing budget, but because of small gaps — things like unclear mobile calls-to-action, weak recent reviews, confusing offers, missing trust signals, or no clear reason for customers to choose them over nearby competitors.
       </p>
 
       <p style="margin:0 0 18px;">
-        I put together a free 2-minute diagnostic that checks exactly this — visibility, trust, website conversion, offers, repeat customers, and how you compare to nearby competitors. No signup, no strings attached:
+        I put together a free 2-minute local growth check that looks at online visibility, trust and reviews, website conversion, offers, repeat-customer opportunities, and nearby competition. No signup, no strings attached:
       </p>
 
       <p style="margin:24px 0;">
         <a href="{diagnostic_url}" style="display:inline-block; background:#1f6feb; color:#ffffff; text-decoration:none; padding:12px 20px; border-radius:8px; font-weight:700; font-size:15px;">
-          View My Free Diagnostic
+          View My Free Growth Check
         </a>
       </p>
 
       <p style="margin:0 0 16px;">
-        If it's not useful, no worries at all — feel free to ignore this.
+        If this is not relevant, just reply <strong>"no"</strong> and I won't follow up.
       </p>
 
       <p style="margin:24px 0 0;">
