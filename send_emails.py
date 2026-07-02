@@ -23,6 +23,7 @@ from email.utils import formataddr
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
+from blocklist_utils import is_blocked
 from email_templates import render_subject, render_body, render_html_body
 
 
@@ -71,6 +72,8 @@ SEND_DELAY_SECONDS = 8
 
 # SMTP 连接超时时间（秒）—— 避免网络卡住时整个脚本长时间无响应
 SMTP_TIMEOUT_SECONDS = 30
+
+DO_NOT_SEND_STATUSES = {"do_not_contact", "not_interested", "replied", "converted"}
 
 
 # ============================================================
@@ -198,12 +201,15 @@ def send_email(to_email: str, subject: str, text_body: str, html_body: str) -> b
         return False
 
 
-def build_diagnostic_link(lead_id: str) -> str:
+def build_diagnostic_link(lead_id: str, outreach_angle: str = "") -> str:
     """
     拼接诊断工具链接。
     注意：这里直接使用CSV里的 lead_id，不再使用CSV行号。
     """
-    query = urlencode({"lead_id": lead_id})
+    query_data = {"lead_id": lead_id}
+    if outreach_angle:
+        query_data["angle"] = outreach_angle
+    query = urlencode(query_data)
     return f"{DIAGNOSTIC_BASE_URL}?{query}"
 
 
@@ -222,22 +228,33 @@ def ensure_csv_columns(rows: list[dict]) -> tuple[list[dict], list[str]]:
     兼容旧CSV：
     - 如果没有 lead_id，基于商家名+网站补一个稳定ID
     - 如果没有 sent_at，补空值
+    - 如果没有增长机会字段，补空值
     """
     if not rows:
         return rows, []
 
     fieldnames = list(rows[0].keys())
 
-    if "lead_id" not in fieldnames:
-        fieldnames.insert(0, "lead_id")
-    if "sent_at" not in fieldnames:
-        insert_at = fieldnames.index("status") + 1 if "status" in fieldnames else len(fieldnames)
-        fieldnames.insert(insert_at, "sent_at")
+    required_fields = [
+        "lead_id", "sent_at", "growth_score", "growth_tier", "growth_reason",
+        "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
+    ]
+    for field in required_fields:
+        if field not in fieldnames:
+            if field == "lead_id":
+                fieldnames.insert(0, field)
+            elif field == "sent_at":
+                insert_at = fieldnames.index("status") + 1 if "status" in fieldnames else len(fieldnames)
+                fieldnames.insert(insert_at, field)
+            else:
+                fieldnames.append(field)
 
     for row in rows:
         if not row.get("lead_id"):
             row["lead_id"] = generate_fallback_lead_id(row.get("business_name", ""), row.get("website", ""))
         row.setdefault("sent_at", "")
+        for field in required_fields:
+            row.setdefault(field, "")
 
     return rows, fieldnames
 
@@ -288,6 +305,8 @@ def main():
         email = row["email"]
         quality = row["email_quality"]
         lead_id = row.get("lead_id") or generate_fallback_lead_id(raw_business_name, row.get("website", ""))
+        outreach_angle = row.get("outreach_angle", "")
+        custom_intro = row.get("dynamic_email_intro", "")
         row["lead_id"] = lead_id
 
         print(f"[{i}/{len(pending_rows)}] {raw_business_name}")
@@ -295,6 +314,21 @@ def main():
             print(f"    显示名称: {business_name}")
         print(f"    Lead ID: {lead_id}")
         print(f"    邮箱: {email} (质量: {quality})")
+        if row.get("growth_score"):
+            print(f"    增长分: {row.get('growth_score')} / {row.get('growth_tier')} / {outreach_angle}")
+            print(f"    增长原因: {row.get('growth_reason', '')}")
+
+        blocked, block_reason = is_blocked(email=email, website=row.get("website", ""), base_dir=BASE_DIR)
+        if blocked:
+            print(f"    已在 blocklist 中，自动跳过: {block_reason}\n")
+            row["status"] = "do_not_contact"
+            skipped_count += 1
+            continue
+
+        if row.get("status") in DO_NOT_SEND_STATUSES:
+            print(f"    状态为 {row.get('status')}，自动跳过\n")
+            skipped_count += 1
+            continue
 
         if quality == "generic" and args.auto_skip_generic:
             print("    自动跳过（generic邮箱）\n")
@@ -302,7 +336,7 @@ def main():
             skipped_count += 1
             continue
 
-        diagnostic_link = build_diagnostic_link(lead_id)
+        diagnostic_link = build_diagnostic_link(lead_id, outreach_angle=outreach_angle)
         city = extract_city_from_address(row.get("address", ""))
         subject = render_subject(business_name, variant_index=i)
         body = render_body(
@@ -310,12 +344,14 @@ def main():
             city=city,
             diagnostic_url=diagnostic_link,
             industry=args.industry,
+            custom_intro=custom_intro,
         )
         html_body = render_html_body(
             business_name=business_name,
             city=city,
             diagnostic_url=diagnostic_link,
             industry=args.industry,
+            custom_intro=custom_intro,
         )
 
         print(f"    发件人显示: {SENDER_DISPLAY_NAME} <{GMAIL_SENDER}>")
