@@ -3,7 +3,7 @@
 运行：streamlit run outreach_panel.py
 
 功能：
-- 从界面运行 run_scrape.py 抓取线索并做质量筛选
+- 从界面运行 run_scrape.py 抓取线索并做增长机会评分
 - 内置城市池，不用手动记城市
 - 查看 leads_output 里的 CSV
 - 统计 pending / sent / skipped / failed 状态
@@ -159,7 +159,12 @@ def save_csv(path: Path, df: pd.DataFrame) -> None:
 
 
 def ensure_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for col in ["lead_id", "business_name", "address", "website", "phone", "email", "email_quality", "status", "sent_at"]:
+    for col in [
+        "lead_id", "business_name", "address", "website", "phone", "email", "email_quality",
+        "status", "sent_at", "growth_score", "growth_tier", "growth_reason",
+        "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
+        "is_likely_chain", "website_scan_status",
+    ]:
         if col not in df.columns:
             df[col] = ""
 
@@ -190,8 +195,9 @@ def row_label(row: pd.Series) -> str:
     name = str(row.get("business_name", "")) or "Unknown business"
     email = str(row.get("email", "")) or "no email"
     status = str(row.get("status", "pending")) or "pending"
-    quality = str(row.get("email_quality", "")) or "unknown"
-    return f"{name}  |  {email}  |  {quality}  |  {status}"
+    score = str(row.get("growth_score", ""))
+    score_part = f"score {score}" if score else "no score"
+    return f"{name}  |  {email}  |  {score_part}  |  {status}"
 
 
 def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, str, str]:
@@ -224,6 +230,7 @@ def run_scrape_command(
     dedupe_existing: bool,
     min_rating: float,
     min_reviews: int,
+    min_growth_score: int,
     require_good_email: bool,
     exclude_keywords: str,
 ) -> subprocess.CompletedProcess[str]:
@@ -241,6 +248,8 @@ def run_scrape_command(
         cmd.extend(["--min-rating", str(min_rating)])
     if min_reviews > 0:
         cmd.extend(["--min-reviews", str(min_reviews)])
+    if min_growth_score > 0:
+        cmd.extend(["--min-growth-score", str(min_growth_score)])
     if require_good_email:
         cmd.append("--require-good-email")
     if exclude_keywords.strip():
@@ -294,7 +303,7 @@ tab_scrape, tab_csv, tab_send, tab_search = st.tabs([
 
 with tab_scrape:
     st.subheader("抓取本地商家")
-    st.write("这里会调用 `run_scrape.py`，先抓取，再按商户质量筛选，输出仍然保存到 `leads_output/`。")
+    st.write("这里会调用 `run_scrape.py`，先抓取，再给每个商户打增长机会分，输出仍然保存到 `leads_output/`。")
 
     preset_name = st.selectbox("城市池", list(CITY_PRESETS.keys()), index=1)
     preset_cities = CITY_PRESETS[preset_name]
@@ -307,22 +316,25 @@ with tab_scrape:
     with col_top3:
         dedupe_existing = st.checkbox("启用历史CSV去重", value=True)
 
-    with st.expander("商户质量筛选", expanded=True):
-        enable_quality_filter = st.checkbox("启用质量筛选", value=True)
-        f1, f2, f3, f4 = st.columns([1, 1, 1.2, 2])
+    with st.expander("增长机会筛选", expanded=True):
+        enable_quality_filter = st.checkbox("启用筛选", value=True)
+        f1, f2, f3, f4, f5 = st.columns([1, 1, 1, 1.2, 2])
         with f1:
             min_rating_input = st.number_input("最低评分", min_value=0.0, max_value=5.0, value=4.0, step=0.1)
         with f2:
             min_reviews_input = st.number_input("最低评论数", min_value=0, max_value=10000, value=10, step=5)
         with f3:
-            require_good_input = st.checkbox("只保留 good 邮箱", value=False)
+            min_growth_score_input = st.number_input("最低增长分", min_value=0, max_value=100, value=60, step=5)
         with f4:
+            require_good_input = st.checkbox("只保留 good 邮箱", value=False)
+        with f5:
             exclude_keywords_input = st.text_input("排除关键词", value="", placeholder="多个用英文逗号分隔，例如 franchise,corporate")
 
-        st.caption("建议前期不要太严格：最低评分 4.0、最低评论数 10、good邮箱不强制。筛太严会导致新CSV为空。")
+        st.caption("建议前期：评分 4.0、评论 10、增长分 60。增长分会综合评分、评论缺口、邮箱、是否连锁、网站是否缺少预约/电话/评价/优惠入口。")
 
     min_rating = float(min_rating_input) if enable_quality_filter else 0.0
     min_reviews = int(min_reviews_input) if enable_quality_filter else 0
+    min_growth_score = int(min_growth_score_input) if enable_quality_filter else 0
     require_good_email = bool(require_good_input) if enable_quality_filter else False
     exclude_keywords = exclude_keywords_input if enable_quality_filter else ""
 
@@ -365,6 +377,7 @@ with tab_scrape:
                         dedupe_existing,
                         min_rating,
                         min_reviews,
+                        min_growth_score,
                         require_good_email,
                         exclude_keywords,
                     )
@@ -431,24 +444,26 @@ with tab_csv:
                 default=["pending", "sent", "skipped", "failed"],
             )
         with col_b:
-            quality_options = sorted([q for q in df["email_quality"].unique().tolist() if q])
-            quality_filter = st.multiselect("邮箱质量", quality_options, default=quality_options)
+            tier_options = sorted([q for q in df["growth_tier"].unique().tolist() if q])
+            tier_filter = st.multiselect("增长等级", tier_options, default=tier_options)
         with col_c:
-            keyword = st.text_input("搜索店名 / 邮箱 / lead_id", value="")
+            keyword = st.text_input("搜索店名 / 邮箱 / lead_id / 增长原因", value="")
 
         filtered = df.copy()
         if status_filter:
             filtered = filtered[filtered["status"].replace("", "pending").isin(status_filter)]
-        if quality_filter:
-            filtered = filtered[filtered["email_quality"].isin(quality_filter)]
+        if tier_filter:
+            filtered = filtered[filtered["growth_tier"].isin(tier_filter)]
         if keyword.strip():
             kw = keyword.strip().lower()
             joined = filtered.astype(str).agg(" ".join, axis=1).str.lower()
             filtered = filtered[joined.str.contains(kw, na=False)]
 
         display_cols = [
+            "growth_score", "growth_tier", "growth_reason",
             "lead_id", "business_name", "email", "email_quality", "status", "sent_at",
-            "website", "phone", "google_rating", "review_count", "address",
+            "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
+            "is_likely_chain", "website", "phone", "google_rating", "review_count", "address",
         ]
         display_cols = [c for c in display_cols if c in filtered.columns]
         st.dataframe(filtered[display_cols], use_container_width=True, height=520)
@@ -508,11 +523,13 @@ with tab_send:
                 st.write("原始店名：", row.get("business_name", ""))
                 st.write("邮箱：", row.get("email", ""))
                 st.write("状态：", row.get("status", "pending"))
+                st.write("增长分：", row.get("growth_score", ""), row.get("growth_tier", ""))
+                st.write("增长原因：", row.get("growth_reason", ""))
                 st.write("Lead ID：", row.get("lead_id", ""))
                 st.write("按钮链接：", diagnostic_link)
                 st.write("发件人显示：", f"{mailer.SENDER_DISPLAY_NAME} <{mailer.GMAIL_SENDER}>")
                 st.write("标题：", subject)
-                st.text_area("纯文本备用正文", text_body, height=310)
+                st.text_area("纯文本备用正文", text_body, height=260)
 
             with right:
                 st.markdown("#### HTML 邮件预览")
@@ -571,7 +588,8 @@ with tab_search:
         if matches:
             result_df = pd.concat(matches, ignore_index=True)
             show_cols = [
-                "csv_file", "lead_id", "business_name", "email", "status", "sent_at",
+                "csv_file", "growth_score", "growth_tier", "growth_reason",
+                "lead_id", "business_name", "email", "status", "sent_at",
                 "website", "phone", "address",
             ]
             show_cols = [c for c in show_cols if c in result_df.columns]
