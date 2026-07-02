@@ -196,6 +196,8 @@ def choose_outreach_angle(row: dict, signals: dict[str, str], maturity_score: in
         return "skip_chain_or_corporate"
     if maturity_score >= 80 and reviews >= 500:
         return "skip_mature_business"
+    if 1 <= reviews < 10 and rating >= 4.5:
+        return "new_business_growth"
     if reviews < 150 and rating >= 4.0:
         return "review_growth"
     if signals.get("website_has_booking") == "no" or signals.get("website_has_phone_cta") == "no":
@@ -208,6 +210,9 @@ def choose_outreach_angle(row: dict, signals: dict[str, str], maturity_score: in
 
 
 def build_dynamic_intro(outreach_angle: str, signals: dict[str, str], maturity_score: int) -> str:
+    if outreach_angle == "new_business_growth":
+        return "It looks like your business may be newer online with a very strong early rating. The next growth opportunity is usually building more reviews, local visibility, and a clearer path from mobile visitors to calls or bookings."
+
     if outreach_angle == "review_growth":
         if maturity_score >= 70:
             return "Your website already looks fairly polished, but there may still be room to grow reviews, local visibility, and trust compared with nearby competitors."
@@ -258,14 +263,17 @@ def calculate_growth_score(row: dict, signals: dict[str, str], maturity_score: i
     else:
         reasons.append("weak rating")
 
-    if 10 <= reviews <= 300:
+    if 1 <= reviews < 10 and rating >= 4.5:
+        score += 22
+        reasons.append("new business with strong early rating")
+    elif 10 <= reviews <= 300:
         score += 20
         reasons.append("review count still has growth room")
     elif 301 <= reviews <= 700:
         score += 10
         reasons.append("moderate review base")
     elif 5 <= reviews < 10:
-        score += 8
+        score += 10
         reasons.append("early review base")
     elif reviews > 700:
         score += 3
@@ -317,7 +325,10 @@ def calculate_growth_score(row: dict, signals: dict[str, str], maturity_score: i
         score += 8
         reasons.append("website maturity looks low")
 
-    if outreach_angle == "review_growth":
+    if outreach_angle == "new_business_growth":
+        score += 12
+        reasons.append("new business growth angle")
+    elif outreach_angle == "review_growth":
         score += 8
         reasons.append("review growth angle")
     elif outreach_angle == "skip_mature_business":
@@ -380,7 +391,9 @@ def row_matches_filters(
         return False, "评分不足"
 
     if min_reviews > 0 and reviews < min_reviews:
-        return False, "评论数不足"
+        is_high_rating_new_business = row.get("outreach_angle") == "new_business_growth" and reviews >= 1
+        if not is_high_rating_new_business:
+            return False, "评论数不足"
 
     if min_growth_score > 0 and growth_score < min_growth_score:
         return False, "增长机会分不足"
@@ -489,7 +502,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=20, help="抓取数量")
     parser.add_argument("--no-dedupe-existing", action="store_true", help="关闭历史CSV去重")
     parser.add_argument("--min-rating", type=float, default=0.0, help="最低 Google 评分；0 表示不筛选")
-    parser.add_argument("--min-reviews", type=int, default=0, help="最低评论数；0 表示不筛选")
+    parser.add_argument("--min-reviews", type=int, default=0, help="最低评论数；0 表示不筛选；高评分新店会自动例外保留")
     parser.add_argument("--min-growth-score", type=int, default=0, help="最低增长机会分；0 表示只打分不筛选")
     parser.add_argument("--require-good-email", action="store_true", help="只保留 good 邮箱，过滤 info/support/contact 等通用邮箱")
     parser.add_argument("--exclude-keywords", default="", help="排除关键词，多个用英文逗号分隔，例如 franchise,corporate,chain")
