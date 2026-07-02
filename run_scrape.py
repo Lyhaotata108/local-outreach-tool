@@ -1,9 +1,9 @@
 """
-自动读取本地 .env 后再运行 scrape_leads.py，并对新生成的 CSV 做增长机会评分、网站成熟度判断、话术角度分配和二次筛选。
+自动读取本地 .env 后再运行 scrape_leads.py，并对新生成的 CSV 做增长机会评分、网站成熟度判断、话术角度分配、发送优先级排序和二次筛选。
 
 用法示例：
 python run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20
-python run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20 --min-rating 4.0 --min-reviews 10 --min-growth-score 60
+python run_scrape.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20 --min-rating 4.0 --min-reviews 1 --min-growth-score 60
 """
 
 from __future__ import annotations
@@ -48,6 +48,17 @@ CHAIN_KEYWORDS = [
     "massage envy", "hand and stone", "hand & stone", "elements massage", "the now massage",
     "spavia", "woodhouse", "massage heights", "franchise", "corporate", "careers",
 ]
+
+ANGLE_PRIORITY_POINTS = {
+    "new_business_growth": 32,
+    "review_growth": 28,
+    "website_conversion": 24,
+    "repeat_booking": 20,
+    "local_seo": 18,
+    "general_growth": 12,
+    "skip_mature_business": -45,
+    "skip_chain_or_corporate": -55,
+}
 
 
 def load_env_file(path: Path) -> None:
@@ -349,21 +360,119 @@ def calculate_growth_score(row: dict, signals: dict[str, str], maturity_score: i
     return score, tier, "; ".join(reasons[:7])
 
 
+def calculate_send_priority_score(
+    row: dict,
+    signals: dict[str, str],
+    maturity_score: int,
+    growth_score: int,
+    outreach_angle: str,
+) -> tuple[int, str, str]:
+    """计算发送优先级。它不是质量分，而是今天应该先发谁。"""
+    rating = parse_float(row.get("google_rating", ""))
+    reviews = parse_int(row.get("review_count", ""))
+    email_quality = str(row.get("email_quality", "")).strip().lower()
+
+    score = 0
+    reasons: list[str] = []
+
+    # 增长分是基础，但不能完全等于发送优先级。
+    score += int(growth_score * 0.35)
+    reasons.append(f"growth score {growth_score}")
+
+    angle_points = ANGLE_PRIORITY_POINTS.get(outreach_angle, 0)
+    score += angle_points
+    reasons.append(f"angle {outreach_angle}")
+
+    if 1 <= reviews < 10 and rating >= 4.5:
+        score += 18
+        reasons.append("high-rating new business")
+    elif 10 <= reviews <= 80 and rating >= 4.2:
+        score += 16
+        reasons.append("small but proven review base")
+    elif 81 <= reviews <= 300 and rating >= 4.0:
+        score += 10
+        reasons.append("healthy review gap")
+    elif reviews == 0:
+        score -= 12
+        reasons.append("zero reviews uncertainty")
+    elif reviews > 700:
+        score -= 20
+        reasons.append("already many reviews")
+
+    if rating >= 4.7:
+        score += 10
+        reasons.append("strong rating")
+    elif 4.0 <= rating < 4.7:
+        score += 7
+        reasons.append("good enough rating")
+    elif rating and rating < 3.8:
+        score -= 22
+        reasons.append("low rating risk")
+
+    if email_quality == "good":
+        score += 12
+        reasons.append("good email")
+    elif email_quality == "generic":
+        score += 3
+        reasons.append("generic email")
+    else:
+        score -= 8
+        reasons.append("weak email signal")
+
+    if maturity_score < 55:
+        score += 8
+        reasons.append("low website maturity")
+    elif maturity_score >= 80:
+        score -= 18
+        reasons.append("mature website")
+
+    if signals.get("is_likely_chain") == "yes":
+        score -= 55
+        reasons.append("chain/corporate risk")
+
+    if outreach_angle in {"skip_mature_business", "skip_chain_or_corporate"}:
+        score = min(score, 25)
+
+    score = max(0, min(100, score))
+    if score >= 80:
+        tier = "first"
+    elif score >= 65:
+        tier = "high"
+    elif score >= 50:
+        tier = "medium"
+    elif score >= 35:
+        tier = "low"
+    else:
+        tier = "skip"
+
+    return score, tier, "; ".join(reasons[:7])
+
+
 def enrich_row_with_growth(row: dict) -> dict:
     signals = analyze_website(row)
     maturity_score, maturity_tier = calculate_website_maturity_score(signals)
     outreach_angle = choose_outreach_angle(row, signals, maturity_score)
     dynamic_intro = build_dynamic_intro(outreach_angle, signals, maturity_score)
-    score, tier, reason = calculate_growth_score(row, signals, maturity_score, outreach_angle)
+    growth_score, growth_tier, growth_reason = calculate_growth_score(row, signals, maturity_score, outreach_angle)
+    priority_score, priority_tier, priority_reason = calculate_send_priority_score(
+        row,
+        signals,
+        maturity_score,
+        growth_score,
+        outreach_angle,
+    )
 
     row.update(signals)
     row["website_maturity_score"] = str(maturity_score)
     row["website_maturity_tier"] = maturity_tier
     row["outreach_angle"] = outreach_angle
     row["dynamic_email_intro"] = dynamic_intro
-    row["growth_score"] = str(score)
-    row["growth_tier"] = tier
-    row["growth_reason"] = reason
+    row["growth_score"] = str(growth_score)
+    row["growth_tier"] = growth_tier
+    row["growth_reason"] = growth_reason
+    row["send_priority_score"] = str(priority_score)
+    row["send_priority_tier"] = priority_tier
+    row["send_priority_reason"] = priority_reason
     return row
 
 
@@ -408,12 +517,27 @@ def row_matches_filters(
         str(row.get("email", "")),
         str(row.get("growth_reason", "")),
         str(row.get("outreach_angle", "")),
+        str(row.get("send_priority_reason", "")),
     ]).lower()
     for keyword in exclude_keywords:
         if keyword and keyword in haystack:
             return False, f"命中排除词:{keyword}"
 
     return True, "保留"
+
+
+def sort_kept_rows(rows: list[dict]) -> list[dict]:
+    """CSV 输出排序：最值得先发的排在最前。"""
+    return sorted(
+        rows,
+        key=lambda r: (
+            parse_int(r.get("send_priority_score", "0")),
+            parse_int(r.get("growth_score", "0")),
+            1 if str(r.get("email_quality", "")).lower() == "good" else 0,
+            -parse_int(r.get("website_maturity_score", "0")),
+        ),
+        reverse=True,
+    )
 
 
 def filter_csv_file(
@@ -430,6 +554,7 @@ def filter_csv_file(
         rows = list(reader)
 
     growth_fields = [
+        "send_priority_score", "send_priority_tier", "send_priority_reason",
         "growth_score", "growth_tier", "growth_reason",
         "website_maturity_score", "website_maturity_tier", "outreach_angle", "dynamic_email_intro",
         "website_has_booking", "website_has_phone_cta", "website_has_reviews", "website_has_offer",
@@ -458,20 +583,24 @@ def filter_csv_file(
         else:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
+    kept_rows = sort_kept_rows(kept_rows)
+
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(kept_rows)
 
-    print("\n增长机会评分与筛选完成：")
+    print("\n增长机会评分、发送优先级排序与筛选完成：")
     print(f"  文件: {path}")
     print(f"  原始线索: {len(rows)}")
     print(f"  保留线索: {len(kept_rows)}")
     if kept_rows:
         avg_score = sum(parse_int(r.get("growth_score", "0")) for r in kept_rows) / len(kept_rows)
         avg_maturity = sum(parse_int(r.get("website_maturity_score", "0")) for r in kept_rows) / len(kept_rows)
+        avg_priority = sum(parse_int(r.get("send_priority_score", "0")) for r in kept_rows) / len(kept_rows)
         print(f"  保留线索平均增长分: {avg_score:.1f}")
         print(f"  保留线索平均网站成熟度: {avg_maturity:.1f}")
+        print(f"  保留线索平均发送优先级: {avg_priority:.1f}")
     if reason_counts:
         print("  过滤原因：")
         for reason, count in reason_counts.items():
