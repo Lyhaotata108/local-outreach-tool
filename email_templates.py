@@ -8,6 +8,7 @@
 """
 
 import html
+from typing import Optional
 
 # ============================================================
 # 标题（Subject Line）— 具体、低压力、避免过度营销
@@ -94,7 +95,7 @@ def render_subject(business_name: str, variant_index: int = 0) -> str:
     return template.format(business_name=business_name)
 
 
-def normalize_custom_intro(custom_intro: str | None = None) -> str:
+def normalize_custom_intro(custom_intro: Optional[str] = None) -> str:
     intro = " ".join((custom_intro or "").strip().split())
     return intro or DEFAULT_CUSTOM_INTRO
 
@@ -105,7 +106,7 @@ def render_body(
     diagnostic_url: str,
     industry: str = "service",
     sender_name: str = "Foxiren",
-    custom_intro: str | None = None,
+    custom_intro: Optional[str] = None,
 ) -> str:
     """渲染纯文本正文，作为HTML邮件的备用版本。"""
     return BODY_TEMPLATE.format(
@@ -124,7 +125,7 @@ def render_html_body(
     diagnostic_url: str,
     industry: str = "service",
     sender_name: str = "Foxiren",
-    custom_intro: str | None = None,
+    custom_intro: Optional[str] = None,
 ) -> str:
     """渲染HTML正文，客户在Gmail等主流邮箱里看到的是按钮版。"""
     return HTML_BODY_TEMPLATE.format(
