@@ -12,6 +12,7 @@
 
 ```text
 local-outreach-tool/
+├── outreach_panel.py     # 本地可视化操作面板（推荐使用）
 ├── email_templates.py    # 邮件标题与正文模板
 ├── scrape_leads.py       # Step 1：抓商家 + 抓邮箱 + 生成CSV
 ├── send_emails.py        # Step 2：读取CSV + 人工确认 + Gmail发送
@@ -28,17 +29,50 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 2. 配置环境变量
+## 2. 配置本地 `.env`
+
+推荐在项目目录创建 `.env`：
 
 ```bash
-export GOOGLE_PLACES_API_KEY='你的Google Places API Key'
-export GMAIL_SENDER='youraccount@gmail.com'
-export GMAIL_APP_PASSWORD='xxxx xxxx xxxx xxxx'
+nano .env
 ```
 
-> `GMAIL_APP_PASSWORD` 是 Gmail App Password，不是 Gmail 登录密码。
+写入以下内容，每个变量一行：
 
-## 3. 抓取线索
+```bash
+export GOOGLE_PLACES_API_KEY="你的Google Places API Key"
+export GMAIL_SENDER="youraccount@gmail.com"
+export GMAIL_APP_PASSWORD="你的Gmail应用专用密码"
+export SENDER_DISPLAY_NAME="Foxiren Growth Check"
+```
+
+保存后，命令行模式可以执行：
+
+```bash
+source .env
+```
+
+> `GMAIL_APP_PASSWORD` 是 Gmail App Password，不是 Gmail 登录密码。  
+> `.env` 不要上传到 GitHub，仓库已经通过 `.gitignore` 忽略它。
+
+## 3. 推荐方式：启动可视化面板
+
+```bash
+streamlit run outreach_panel.py
+```
+
+启动后浏览器会打开一个本地页面，包含四个功能区：
+
+```text
+① 抓取线索：填写行业、城市、州、数量，点击按钮运行 scrape_leads.py
+② 查看CSV：查看 leads_output 里的所有线索，筛选 pending/sent/skipped/failed
+③ 预览/发送邮件：选择单条线索，预览HTML按钮邮件，点击发送并自动回写CSV状态
+④ lead_id 搜索：收到诊断提交后，用 Outreach Lead ID 反查原始商家
+```
+
+面板运行在你自己的 Mac 本地，密钥仍然只在本机 `.env` 里，不会上传到服务器。
+
+## 4. 命令行方式：抓取线索
 
 ```bash
 python scrape_leads.py --industry "massage spa" --city "Orlando" --state "FL" --limit 20
@@ -56,7 +90,7 @@ CSV 会包含这些关键字段：
 lead_id,business_name,address,website,phone,google_rating,review_count,email,email_quality,all_emails_found,status,sent_at,scraped_at
 ```
 
-## 4. 发送邮件
+## 5. 命令行方式：发送邮件
 
 ```bash
 python send_emails.py --file leads_output/leads_Orlando_20260630_143000.csv --industry "massage spa"
@@ -68,7 +102,7 @@ python send_emails.py --file leads_output/leads_Orlando_20260630_143000.csv --in
 python send_emails.py --file leads_output/leads_Orlando_20260630_143000.csv --industry "massage spa" --auto-skip-generic
 ```
 
-## 5. lead_id 追踪逻辑
+## 6. lead_id 追踪逻辑
 
 `scrape_leads.py` 会基于：
 
@@ -90,16 +124,16 @@ https://local-business-test.vercel.app/?lead_id=lead_2b8fb8456fd68193
 
 这样即使CSV重新生成，行号变化，也可以通过 `lead_id` 对照原始商家信息。
 
-## 6. sent_at 转化统计
+## 7. sent_at 转化统计
 
-`send_emails.py` 发送成功后会写入：
+`send_emails.py` 或 `outreach_panel.py` 发送成功后会写入：
 
 ```text
 status=sent
 sent_at=2026-06-30T15:30:00
 ```
 
-后续你收到诊断工具邮件时，可以用邮件里的 `Outreach Lead ID` 回到CSV里查：
+后续你收到诊断工具邮件时，可以用邮件里的 `Outreach Lead ID` 回到面板第 ④ 个功能区搜索，也可以用命令行查：
 
 ```bash
 grep 'lead_2b8fb8456fd68193' leads_output/*.csv
