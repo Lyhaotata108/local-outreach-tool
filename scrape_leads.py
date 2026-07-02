@@ -13,14 +13,18 @@ import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+
+from seen_leads_utils import add_seen_lead, load_seen_keys
 
 # ============================================================
 # 配置
 # ============================================================
 
+BASE_DIR = Path(__file__).resolve().parent
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 OUTPUT_DIR = "leads_output"
 
@@ -37,7 +41,7 @@ JUNK_EMAIL_PATTERNS = [
     r"sentry\.io$",
     r"wixpress\.com$",
     r"godaddy\.com$",
-    r"\.png$", r"\.jpg$", r"\.jpeg$", r"\.gif$", r"\.svg$",  # 误抓到图片文件名
+    r"\.png$", r"\.jpg$", r"\.jpeg$", r"\.gif$", r"\.svg$",
 ]
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -48,9 +52,7 @@ EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 # ============================================================
 
 def normalize_website_for_id(website: str) -> str:
-    """
-    归一化网站地址，避免 http/https、末尾斜杠、大小写导致同一家店生成不同 lead_id。
-    """
+    """归一化网站地址，避免同一家店生成不同 lead_id。"""
     raw = (website or "").strip().lower()
     if not raw:
         return ""
@@ -62,13 +64,7 @@ def normalize_website_for_id(website: str) -> str:
 
 
 def generate_lead_id(business_name: str, website: str) -> str:
-    """
-    基于 business_name + website 生成稳定ID。
-
-    选择 hashlib 而不是 uuid4 的原因：
-    - 同一家商家重复抓取时，仍然能得到同一个 lead_id
-    - CSV重新生成、行号变化，也不会影响追踪
-    """
+    """基于 business_name + website 生成稳定ID。"""
     normalized_name = " ".join((business_name or "").strip().lower().split())
     normalized_website = normalize_website_for_id(website)
     source = f"{normalized_name}|{normalized_website}"
@@ -82,11 +78,8 @@ def generate_lead_id(business_name: str, website: str) -> str:
 
 def load_existing_lead_keys(output_dir: str = OUTPUT_DIR) -> dict[str, set[str]]:
     """
-    读取 leads_output 下所有历史 CSV，建立去重索引。
-    默认按照 lead_id + website + email 三层去重：
-    - lead_id：同店名+同网站稳定唯一
-    - website：防止老CSV没有lead_id或店名细微变化
-    - email：防止不同页面/分店抓到同一个邮箱反复外联
+    读取 seen_leads.csv + leads_output 下所有历史 CSV，建立去重索引。
+    seen_leads.csv 会记录所有曾经检查过的商户，所以即使某些线索后续被评分过滤掉，也不会反复抓取。
     """
     keys = {
         "lead_ids": set(),
@@ -94,6 +87,12 @@ def load_existing_lead_keys(output_dir: str = OUTPUT_DIR) -> dict[str, set[str]]
         "emails": set(),
     }
 
+    # 1. 优先读取全局 seen_leads.csv
+    seen_keys = load_seen_keys(BASE_DIR)
+    for key_name in keys:
+        keys[key_name].update(seen_keys[key_name])
+
+    # 2. 兼容旧版本：继续读取 leads_output 下历史 CSV
     if not os.path.isdir(output_dir):
         return keys
 
@@ -124,8 +123,24 @@ def load_existing_lead_keys(output_dir: str = OUTPUT_DIR) -> dict[str, set[str]]
     return keys
 
 
+def record_seen_place(place: dict, args: argparse.Namespace, email: str = "", status: str = "seen") -> None:
+    """把已经检查过的商户写入 seen_leads.csv，用于长期去重。"""
+    add_seen_lead(
+        BASE_DIR,
+        lead_id=place.get("lead_id", ""),
+        business_name=place.get("business_name", ""),
+        website=place.get("website", ""),
+        email=email,
+        city=args.city,
+        state=args.state,
+        industry=args.industry,
+        status=status,
+        source="scrape_leads",
+    )
+
+
 def is_existing_place(place: dict, existing_keys: dict[str, set[str]]) -> bool:
-    """判断 Google Places 返回的商家是否已经在历史 CSV 中出现过。"""
+    """判断 Google Places 返回的商家是否已经在历史记录中出现过。"""
     normalized_website = normalize_website_for_id(place.get("website", ""))
     return (
         place.get("lead_id") in existing_keys["lead_ids"]
@@ -134,7 +149,7 @@ def is_existing_place(place: dict, existing_keys: dict[str, set[str]]) -> bool:
 
 
 def has_existing_email(emails: list[dict], existing_keys: dict[str, set[str]]) -> bool:
-    """判断本次抓到的邮箱是否已经出现在历史 CSV 中。"""
+    """判断本次抓到的邮箱是否已经出现在历史记录中。"""
     for item in emails:
         email = (item.get("email") or "").strip().lower()
         if email and email in existing_keys["emails"]:
@@ -147,10 +162,7 @@ def has_existing_email(emails: list[dict], existing_keys: dict[str, set[str]]) -
 # ============================================================
 
 def search_places(industry: str, city: str, state: str, limit: int) -> list[dict]:
-    """
-    用 Places API (New) 的 searchText 接口搜索商家。
-    返回字段：name, formattedAddress, websiteUri, internationalPhoneNumber
-    """
+    """用 Places API (New) 的 searchText 接口搜索商家。"""
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -163,7 +175,7 @@ def search_places(industry: str, city: str, state: str, limit: int) -> list[dict
     }
     body = {
         "textQuery": f"{industry} in {city}, {state}",
-        "maxResultCount": min(limit, 20),  # API 单次最多返回20条
+        "maxResultCount": min(limit, 20),
     }
 
     resp = requests.post(url, headers=headers, json=body)
@@ -174,7 +186,7 @@ def search_places(industry: str, city: str, state: str, limit: int) -> list[dict
     for place in data.get("places", []):
         website = place.get("websiteUri")
         if not website:
-            continue  # 只要有网站的商家，没网站的没法抓邮箱
+            continue
 
         business_name = place.get("displayName", {}).get("text", "")
         results.append({
@@ -203,10 +215,7 @@ def is_junk_email(email: str) -> bool:
 
 
 def classify_email_quality(email: str) -> str:
-    """
-    返回 'good'（可能是老板/个人邮箱）或 'generic'（info@/support@ 这类通用邮箱）
-    优先发 good，generic 作为备选，不直接丢弃（总比没有强）
-    """
+    """返回 good 或 generic。"""
     prefix = email.split("@")[0].lower()
     if prefix in GENERIC_EMAIL_PREFIXES:
         return "generic"
@@ -214,12 +223,8 @@ def classify_email_quality(email: str) -> str:
 
 
 def extract_emails_from_website(url: str, timeout: int = 8) -> list[dict]:
-    """
-    访问网站首页（以及常见的 /contact /about 页面），提取邮箱并分类。
-    返回 [{"email": "...", "quality": "good"|"generic"}]
-    """
+    """访问网站首页以及常见联系页面，提取邮箱并分类。"""
     pages_to_try = [url]
-    # 尝试常见的联系页面路径，邮箱经常藏在这里而不是首页
     for path in ["/contact", "/contact-us", "/about"]:
         pages_to_try.append(url.rstrip("/") + path)
 
@@ -239,18 +244,17 @@ def extract_emails_from_website(url: str, timeout: int = 8) -> list[dict]:
                 if not is_junk_email(m):
                     found_emails.add(m.lower())
         except requests.RequestException:
-            continue  # 单个页面失败不影响整体，继续试下一个
+            continue
 
-        time.sleep(0.5)  # 避免请求过快被网站拦截
+        time.sleep(0.5)
 
         if found_emails:
-            break  # 找到了就不用继续试其他页面了
+            break
 
     result = []
     for email in found_emails:
         result.append({"email": email, "quality": classify_email_quality(email)})
 
-    # 排序：good 排在 generic 前面，方便后续优先选用
     result.sort(key=lambda x: 0 if x["quality"] == "good" else 1)
     return result
 
@@ -265,19 +269,19 @@ def main():
     parser.add_argument("--city", required=True, help="城市，例如 'Orlando'")
     parser.add_argument("--state", required=True, help="州，例如 'FL'")
     parser.add_argument("--limit", type=int, default=20, help="抓取商家数量上限")
-    parser.add_argument("--no-dedupe-existing", action="store_true", help="关闭历史CSV去重，允许重复抓取旧线索")
+    parser.add_argument("--no-dedupe-existing", action="store_true", help="关闭历史CSV/seen_leads去重，允许重复抓取旧线索")
     args = parser.parse_args()
 
     if not GOOGLE_PLACES_API_KEY:
         print("错误：未设置 GOOGLE_PLACES_API_KEY 环境变量")
-        print("运行前先执行: export GOOGLE_PLACES_API_KEY='你的key'")
+        print("请在项目目录创建 .env，并写入: export GOOGLE_PLACES_API_KEY='你的key'")
         return
 
     existing_keys = {"lead_ids": set(), "websites": set(), "emails": set()}
     if not args.no_dedupe_existing:
         existing_keys = load_existing_lead_keys(OUTPUT_DIR)
         existing_total = len(existing_keys["lead_ids"])
-        print(f"历史去重已开启：已读取 {existing_total} 条历史 lead_id。")
+        print(f"历史去重已开启：已读取 {existing_total} 条历史 lead_id（seen_leads.csv + leads_output）。")
         print("如果确实要重复抓旧线索，可加参数: --no-dedupe-existing\n")
 
     print(f"正在搜索 {args.city}, {args.state} 的 {args.industry} 商家（最多{args.limit}家）...")
@@ -285,7 +289,7 @@ def main():
     print(f"找到 {len(places)} 家有网站的商家，开始抓取邮箱...\n")
 
     rows = []
-    seen_lead_ids = set()
+    seen_lead_ids_this_run = set()
     skipped_existing = 0
     skipped_no_email = 0
     skipped_same_run = 0
@@ -294,11 +298,11 @@ def main():
     for i, place in enumerate(places, 1):
         print(f"[{i}/{len(places)}] {place['business_name']} - {place['website']}")
 
-        if place["lead_id"] in seen_lead_ids:
+        if place["lead_id"] in seen_lead_ids_this_run:
             print(f"    本次重复线索，跳过: {place['lead_id']}")
             skipped_same_run += 1
             continue
-        seen_lead_ids.add(place["lead_id"])
+        seen_lead_ids_this_run.add(place["lead_id"])
 
         if not args.no_dedupe_existing and is_existing_place(place, existing_keys):
             print(f"    历史重复线索，跳过: {place['lead_id']}")
@@ -308,26 +312,30 @@ def main():
         emails = extract_emails_from_website(place["website"])
 
         if not emails:
-            print("    未找到邮箱，跳过")
+            print("    未找到邮箱，记录到 seen_leads 后跳过")
+            record_seen_place(place, args, email="", status="no_email")
             skipped_no_email += 1
             continue
 
         if not args.no_dedupe_existing and has_existing_email(emails, existing_keys):
-            print("    邮箱已在历史CSV中出现过，跳过")
+            print("    邮箱已在历史记录中出现过，跳过")
+            record_seen_place(place, args, email=emails[0].get("email", ""), status="duplicate_email")
             skipped_existing_email += 1
             continue
 
-        best_email = emails[0]  # 已排序，good优先
+        best_email = emails[0]
         print(f"    Lead ID: {place['lead_id']}")
         print(f"    找到邮箱: {best_email['email']} (质量: {best_email['quality']})")
+
+        record_seen_place(place, args, email=best_email["email"], status="captured")
 
         rows.append({
             **place,
             "email": best_email["email"],
             "email_quality": best_email["quality"],
             "all_emails_found": "; ".join(e["email"] for e in emails),
-            "status": "pending",  # pending / sent / skipped / failed
-            "sent_at": "",        # send_emails.py 发送成功后写入
+            "status": "pending",
+            "sent_at": "",
             "scraped_at": datetime.now().isoformat(timespec="seconds"),
         })
 
@@ -337,6 +345,7 @@ def main():
     print(f"  历史重复邮箱: {skipped_existing_email}")
     print(f"  本次重复: {skipped_same_run}")
     print(f"  未找到邮箱: {skipped_no_email}")
+    print("  seen_leads.csv 已记录本次检查过的商户，用于后续长期去重。")
 
     if not rows:
         print("\n没有抓到新的带邮箱商家，结束。")
