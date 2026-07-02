@@ -3,7 +3,7 @@
 运行：streamlit run outreach_panel.py
 
 功能：
-- 从界面运行 scrape_leads.py 抓取线索
+- 从界面运行 run_scrape.py 抓取线索并做质量筛选
 - 内置城市池，不用手动记城市
 - 查看 leads_output 里的 CSV
 - 统计 pending / sent / skipped / failed 状态
@@ -216,10 +216,20 @@ def render_email_for_row(row: pd.Series, industry: str) -> tuple[str, str, str, 
     return business_name, subject, text_body, html_body, diagnostic_link
 
 
-def run_scrape_command(industry: str, city: str, state: str, limit: int, dedupe_existing: bool) -> subprocess.CompletedProcess[str]:
+def run_scrape_command(
+    industry: str,
+    city: str,
+    state: str,
+    limit: int,
+    dedupe_existing: bool,
+    min_rating: float,
+    min_reviews: int,
+    require_good_email: bool,
+    exclude_keywords: str,
+) -> subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
-        str(BASE_DIR / "scrape_leads.py"),
+        str(BASE_DIR / "run_scrape.py"),
         "--industry", industry,
         "--city", city,
         "--state", state,
@@ -227,6 +237,14 @@ def run_scrape_command(industry: str, city: str, state: str, limit: int, dedupe_
     ]
     if not dedupe_existing:
         cmd.append("--no-dedupe-existing")
+    if min_rating > 0:
+        cmd.extend(["--min-rating", str(min_rating)])
+    if min_reviews > 0:
+        cmd.extend(["--min-reviews", str(min_reviews)])
+    if require_good_email:
+        cmd.append("--require-good-email")
+    if exclude_keywords.strip():
+        cmd.extend(["--exclude-keywords", exclude_keywords.strip()])
 
     return subprocess.run(
         cmd,
@@ -276,7 +294,7 @@ tab_scrape, tab_csv, tab_send, tab_search = st.tabs([
 
 with tab_scrape:
     st.subheader("抓取本地商家")
-    st.write("这里会调用现有的 `scrape_leads.py`，输出仍然保存到 `leads_output/`。默认会对历史 CSV 去重。")
+    st.write("这里会调用 `run_scrape.py`，先抓取，再按商户质量筛选，输出仍然保存到 `leads_output/`。")
 
     preset_name = st.selectbox("城市池", list(CITY_PRESETS.keys()), index=1)
     preset_cities = CITY_PRESETS[preset_name]
@@ -288,6 +306,25 @@ with tab_scrape:
         limit = st.number_input("每个城市抓取数量", min_value=1, max_value=200, value=20, step=1)
     with col_top3:
         dedupe_existing = st.checkbox("启用历史CSV去重", value=True)
+
+    with st.expander("商户质量筛选", expanded=True):
+        enable_quality_filter = st.checkbox("启用质量筛选", value=True)
+        f1, f2, f3, f4 = st.columns([1, 1, 1.2, 2])
+        with f1:
+            min_rating_input = st.number_input("最低评分", min_value=0.0, max_value=5.0, value=4.0, step=0.1)
+        with f2:
+            min_reviews_input = st.number_input("最低评论数", min_value=0, max_value=10000, value=10, step=5)
+        with f3:
+            require_good_input = st.checkbox("只保留 good 邮箱", value=False)
+        with f4:
+            exclude_keywords_input = st.text_input("排除关键词", value="", placeholder="多个用英文逗号分隔，例如 franchise,corporate")
+
+        st.caption("建议前期不要太严格：最低评分 4.0、最低评论数 10、good邮箱不强制。筛太严会导致新CSV为空。")
+
+    min_rating = float(min_rating_input) if enable_quality_filter else 0.0
+    min_reviews = int(min_reviews_input) if enable_quality_filter else 0
+    require_good_email = bool(require_good_input) if enable_quality_filter else False
+    exclude_keywords = exclude_keywords_input if enable_quality_filter else ""
 
     if preset_cities:
         city_labels = [f"{city}, {state}" for city, state in preset_cities]
@@ -308,7 +345,7 @@ with tab_scrape:
 
     if st.button("开始抓取", type="primary"):
         if not os.environ.get("GOOGLE_PLACES_API_KEY"):
-            st.error("未检测到 GOOGLE_PLACES_API_KEY。请先在 .env 里配置，或在终端 export 后重启面板。")
+            st.error("未检测到 GOOGLE_PLACES_API_KEY。请先在 .env 里配置，然后重启面板。")
         else:
             all_stdout: list[str] = []
             all_stderr: list[str] = []
@@ -320,7 +357,17 @@ with tab_scrape:
             for idx, (run_city, run_state) in enumerate(target_cities, 1):
                 status_box.info(f"正在抓取 {idx}/{len(target_cities)}：{run_city}, {run_state}")
                 with st.spinner(f"正在抓取 {run_city}, {run_state}..."):
-                    result = run_scrape_command(industry, run_city, run_state, int(limit), dedupe_existing)
+                    result = run_scrape_command(
+                        industry,
+                        run_city,
+                        run_state,
+                        int(limit),
+                        dedupe_existing,
+                        min_rating,
+                        min_reviews,
+                        require_good_email,
+                        exclude_keywords,
+                    )
 
                 header = f"\n========== {run_city}, {run_state} =========="
                 if result.stdout:
@@ -334,7 +381,7 @@ with tab_scrape:
 
             status_box.empty()
             if all_stdout:
-                st.text_area("输出", "\n".join(all_stdout), height=320)
+                st.text_area("输出", "\n".join(all_stdout), height=360)
             if all_stderr:
                 st.text_area("错误/警告", "\n".join(all_stderr), height=180)
 
